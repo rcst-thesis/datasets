@@ -152,12 +152,10 @@ def run(
 
     if strategy == "downsample_en":
         downsample(en_clean,  en_bal,  n=hil_lines, seed=seed)
-        hil_clean.replace(hil_bal)      # Hiligaynon unchanged
-        hil_bal.write_text(hil_clean.read_text())
+        hil_bal.write_text(hil_clean.read_text())      # Hiligaynon unchanged (copy, don't move)
     elif strategy == "upsample_hil":
         upsample(hil_clean, hil_bal, n=en_lines, seed=seed)
-        en_clean.replace(en_bal)
-        en_bal.write_text(en_clean.read_text())
+        en_bal.write_text(en_clean.read_text())        # English unchanged (copy, don't move)
     else:
         # balanced: downsample both to the smaller
         downsample(en_clean,  en_bal,  n=target, seed=seed)
