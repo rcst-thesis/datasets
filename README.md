@@ -17,3 +17,43 @@ This will convert any valid `.csv` file into equivalent `.tsv`
  python parallel_analyzer.py tagalog-filipino-english-translation/train_data.csv
 ```
 Should specify the valid `.tsv` as the target file
+
+### Scraping dataset
+Install this deps
+```
+pip install requests beautifulsoup4 langdetect tqdm lxml
+```
+
+Running the scraper
+```
+# all sources, default limits
+python scrape_hiligaynon.py
+
+# Wikipedia only, 3000 articles
+python scrape_hiligaynon.py --sources wikipedia --wiki-limit 3000
+
+# resume an interrupted run
+python scrape_hiligaynon.py --resume
+```
+
+### Converting opus datasets
+OPUS corpora come in a few formats — let me make it handle all the common ones.Three input modes depending on what OPUS gave you:
+
+```bash
+# Most common — paired plain text files
+python opus_to_tsv.py --paired en.txt hil.txt -o test.tsv
+
+# TMX translation memory
+python opus_to_tsv.py --tmx corpus.tmx --src-lang en --tgt-lang hil -o test.tsv
+
+# Moses-style XML (the .xml files from OPUS downloads)
+python opus_to_tsv.py --xml en.xml hil.xml -o test.tsv
+```
+
+Sampling flags for building a proper test split:
+```bash
+# Grab 1000 random pairs as your test set
+python opus_to_tsv.py --paired en.txt hil.txt -o test.tsv --shuffle --max 1000
+```
+
+Output is a two-column TSV with a `src`/`tgt` header by default — pass `--src-col` / `--tgt-col` to rename them. `--skip-empty` drops any pairs where either side is blank, which is worth doing before evaluation.
