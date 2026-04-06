@@ -14,7 +14,17 @@ This will convert any valid `.csv` file into equivalent `.tsv`
 
 ### Validating the quality of a dataset
 ```
- python parallel_analyzer.py tagalog-filipino-english-translation/train_data.csv
+  python parallel_analyzer.py tagalog-filipino-english-translation/train_data.csv
+
+  # monolingual
+  python parallel_analyzer.py --src hil_raw.txt
+
+  # parallel txt pair
+  python parallel_analyzer.py --src corpus_en.txt --tgt corpus_tl.txt
+
+  # parallel csv/tsv
+  python parallel_analyzer.py data.tsv
+  python parallel_analyzer.py data.tsv --src-col en --tgt-col tl
 ```
 Should specify the valid `.tsv` as the target file
 
