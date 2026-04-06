@@ -14,7 +14,17 @@ This will convert any valid `.csv` file into equivalent `.tsv`
 
 ### Validating the quality of a dataset
 ```
- python parallel_analyzer.py tagalog-filipino-english-translation/train_data.csv
+  python parallel_analyzer.py tagalog-filipino-english-translation/train_data.csv
+
+  # monolingual
+  python parallel_analyzer.py --src hil_raw.txt
+
+  # parallel txt pair
+  python parallel_analyzer.py --src corpus_en.txt --tgt corpus_tl.txt
+
+  # parallel csv/tsv
+  python parallel_analyzer.py data.tsv
+  python parallel_analyzer.py data.tsv --src-col en --tgt-col tl
 ```
 Should specify the valid `.tsv` as the target file
 
@@ -75,3 +85,53 @@ I	Ako
 ```
 
 One note on `trgs` — it's a list, so by default only the first translation is taken. If you want every target as its own row (useful if entries have multiple valid translations), pass `--all-trgs`.
+
+### .parquet to tsv
+```
+# Auto-names output (data.parquet → data.tsv)
+python converter.py data.parquet
+
+# Specify output path
+python converter.py data.parquet output.tsv
+```
+
+### pre ppping corpus for base training
+Here's a complete Python implementation of the pipeline:
+**Basic usage:**
+```bash
+python corpus_prep.py en.txt hil.txt
+```
+
+**With all options:**
+```bash
+python corpus_prep.py en.txt hil.txt \
+  --out ./corpus_out \
+  --strategy downsample_en \   # or upsample_hil / balanced
+  --tokenize \                 # trains + encodes with SentencePiece
+  --vocab 8000 \
+  --seed 42
+```
+
+**Install optional dependency** (only needed for `--tokenize`):
+```bash
+pip install sentencepiece
+```
+
+**What the script produces in `corpus_out/`:**
+
+| File                    | Description                           |
+| ----------------------- | ------------------------------------- |
+| `en_clean.txt`          | Whitespace-normalized English         |
+| `hil_clean.txt`         | Whitespace-normalized Hiligaynon      |
+| `en_balanced.txt`       | English after balancing strategy      |
+| `hil_balanced.txt`      | Hiligaynon after balancing strategy   |
+| `mixed.txt`             | Concatenated (ordered)                |
+| `mixed_shuffled.txt`    | **Your pretraining corpus**           |
+| `sp_model.model`        | SentencePiece model (if `--tokenize`) |
+| `mixed_shuffled.sp.txt` | Encoded corpus (if `--tokenize`)      |
+
+**Three balancing strategies:**
+
+- `downsample_en` — randomly samples English down to match Hiligaynon size (recommended when EN is much larger)
+- `upsample_hil` — repeats Hiligaynon lines to match English size (more data, but repetition risk)
+- `balanced` — downsamples *both* to the smaller corpus (strictest, least data)
