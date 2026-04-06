@@ -57,3 +57,21 @@ python opus_to_tsv.py --paired en.txt hil.txt -o test.tsv --shuffle --max 1000
 ```
 
 Output is a two-column TSV with a `src`/`tgt` header by default — pass `--src-col` / `--tgt-col` to rename them. `--skip-empty` drops any pairs where either side is blank, which is worth doing before evaluation.
+
+### JSONL to TSV
+```bash
+# Output defaults to same name as input with .tsv extension
+python jsonl_to_tsv.py corpus.jsonl
+
+# Explicit output path
+python jsonl_to_tsv.py corpus.jsonl -o data/test.tsv
+```
+
+Your sample data would produce:
+```
+src	tgt
+Hiligaynon	Hiligaynon
+I	Ako
+```
+
+One note on `trgs` — it's a list, so by default only the first translation is taken. If you want every target as its own row (useful if entries have multiple valid translations), pass `--all-trgs`.
