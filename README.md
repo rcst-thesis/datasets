@@ -26,14 +26,14 @@ pip install requests beautifulsoup4 langdetect tqdm lxml
 
 Running the scraper
 ```
-# all sources, default limits
-python scrape_hiligaynon.py
+# Start fresh, all categories
+python scrape_bombo.py
 
-# Wikipedia only, 3000 articles
-python scrape_hiligaynon.py --sources wikipedia --wiki-limit 3000
+# Just the most Hiligaynon-dense categories
+python scrape_bombo.py --categories top-stories balita-espesyal
 
-# resume an interrupted run
-python scrape_hiligaynon.py --resume
+# If you start getting 429s, raise the delay and resume
+python scrape_bombo.py --delay 3.0 --resume
 ```
 
 ### Converting opus datasets
