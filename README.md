@@ -75,3 +75,12 @@ I	Ako
 ```
 
 One note on `trgs` — it's a list, so by default only the first translation is taken. If you want every target as its own row (useful if entries have multiple valid translations), pass `--all-trgs`.
+
+### .parquet to tsv
+```
+# Auto-names output (data.parquet → data.tsv)
+python converter.py data.parquet
+
+# Specify output path
+python converter.py data.parquet output.tsv
+```
