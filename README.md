@@ -135,3 +135,20 @@ pip install sentencepiece
 - `downsample_en` — randomly samples English down to match Hiligaynon size (recommended when EN is much larger)
 - `upsample_hil` — repeats Hiligaynon lines to match English size (more data, but repetition risk)
 - `balanced` — downsamples *both* to the smaller corpus (strictest, least data)
+
+### Synthetic converter
+```sh
+python translate_corpus.py english.txt hiligaynon.txt
+
+# GPU, larger batches, greedy for speed:
+python translate_corpus.py english.txt hiligaynon.txt --device cuda --batch-size 64 --num-beams 1
+
+# Crashed halfway? Resume:
+python translate_corpus.py english.txt hiligaynon.txt --resume
+
+# EN → HIL (default)
+python translate_corpus.py english.txt hiligaynon.txt
+
+# HIL → EN
+python translate_corpus.py hiligaynon.txt english.txt --direction hil2en
+```
