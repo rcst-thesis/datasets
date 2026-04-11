@@ -15,6 +15,17 @@ BASE_DIR  = Path(__file__).parent
 SPELL_DIR = BASE_DIR / "spell-checker"
 app = Flask(__name__)
 
+# ── load cleaner ──────────────────────────────────────────────────────────────
+import importlib.util as _ilu
+_clean_spec = _ilu.spec_from_file_location("clean", BASE_DIR / "clean.py")
+_clean_mod  = _ilu.module_from_spec(_clean_spec)
+try:
+    _clean_spec.loader.exec_module(_clean_mod)
+    CLEANER_OK = True
+except Exception as _e:
+    CLEANER_OK = False
+    print(f"[warn] cleaner unavailable: {_e}")
+
 # ── helpers ──────────────────────────────────────────────────────────────────
 
 def find_tsv_files() -> list[dict]:
@@ -63,12 +74,22 @@ def strip_diacritics(text: str) -> str:
     return "".join(c for c in nfd if unicodedata.category(c) != "Mn").lower()
 
 
-def build_tagalog_map() -> dict[str, str]:
+def build_dialect_map() -> tuple[dict[str, str], set[str]]:
     """
-    Load {normalized_tagalog_word: hiligaynon_replacement} from
-    spell-checker/words.csv and spell-checker/verbs.csv.
+    Build:
+      - dialect_map : {normalized_source_word → ilonggo_form}
+                      Maps non-standard / non-Ilonggo forms to their
+                      proper Iloilo city-dialect equivalents.
+      - ilonggo_vocab : set of normalized words already in Ilonggo
+                        (derived from the target_word column).
+
+    A source word is excluded from dialect_map if it also appears as a
+    proper Ilonggo word — those words are valid in the dialect even if
+    they look like a non-standard form (e.g. 'daan' = old/former in Ilonggo).
     """
-    mapping: dict[str, str] = {}
+    raw:          dict[str, str] = {}
+    ilonggo_vocab: set[str]      = set()
+
     for fname in ("words.csv", "verbs.csv"):
         fp = SPELL_DIR / fname
         if not fp.exists():
@@ -78,17 +99,126 @@ def build_tagalog_map() -> dict[str, str]:
                 base   = strip_diacritics(row["base_word"].strip())
                 target = row["target_word"].strip()
                 if base and target:
-                    mapping[base] = target
-    return mapping
+                    raw[base] = target
+                    # Every token in target is a confirmed Ilonggo word
+                    for tok in re.split(r"\s+", target.lower()):
+                        if tok:
+                            ilonggo_vocab.add(strip_diacritics(tok))
+
+    # Keep only entries where the source word is NOT already a proper Ilonggo word
+    dialect_map = {
+        base: target
+        for base, target in raw.items()
+        if base != strip_diacritics(target)    # skip identical pairs (mga→mga)
+        and base not in ilonggo_vocab          # skip words native to Ilonggo (daan, etc.)
+    }
+    return dialect_map, ilonggo_vocab
 
 
 # Load once at startup
-TAGALOG_MAP: dict[str, str] = build_tagalog_map()
+DIALECT_MAP, ILONGGO_VOCAB = build_dialect_map()
+
+
+# ── grammar checker ───────────────────────────────────────────────────────────
+
+def load_grammar_phrases() -> list:
+    """Load phrase-level patterns from spell-checker/phrases.csv."""
+    fp = SPELL_DIR / "phrases.csv"
+    if not fp.exists():
+        return []
+    phrases = []
+    with open(fp, encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            pat = row["pattern"].strip()
+            rep = row["replacement"].strip()
+            if pat and rep:
+                phrases.append((re.compile(pat, re.IGNORECASE), rep))
+    return phrases
+
+
+HIL_PHRASES = load_grammar_phrases()
+
+
+def grammar_correct(text: str) -> str:
+    """
+    Apply the full Hiligaynon→Ilonggo normalization pipeline
+    (phrase + word + sentence rules).
+    Does NOT apply letter-shift rules (those are handled by the converter).
+    Uses DIALECT_MAP which already excludes words native to Ilonggo.
+    """
+    if not text.strip():
+        return text
+
+    # Phase 1: multi-word phrase patterns (highest priority)
+    for pattern, replacement in HIL_PHRASES:
+        def _repl(m, r=replacement):
+            return (r[0].upper() + r[1:]) if m.group(0) and m.group(0)[0].isupper() else r
+        text = pattern.sub(_repl, text)
+
+    # Phase 2: word-level corrections
+    def _word(m):
+        word   = m.group(0)
+        target = DIALECT_MAP.get(strip_diacritics(word.lower()))
+        if not target:
+            return word
+        return (target[0].upper() + target[1:]) if word[0].isupper() else target
+    text = re.sub(r"[\w'-]+", _word, text)
+
+    # Phase 3: sentence structure rules
+    # ay-inversion: "Si/Ang X ay Y" → "Si/Ang X Y"
+    text = re.sub(
+        r"\b((?:si|ang)\s+[\w\s]+?)\s+ay\s+", r"\1 ", text, flags=re.IGNORECASE
+    )
+    # ba → bala (standalone particle)
+    text = re.sub(r"\bba\b", "bala", text, flags=re.IGNORECASE)
+
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def grammar_check_sentence(row_idx: int, text: str) -> dict | None:
+    """
+    Return a correction dict if the text can be improved, else None.
+    Diff marks tokens in the corrected sentence that were NOT present
+    in the original (set-based, so positional shifts don't cause false marks).
+    """
+    corrected = grammar_correct(text)
+    if corrected == text:
+        return None
+
+    corr_set  = {strip_diacritics(t) for t in re.split(r"\W+", corrected.lower()) if t}
+    orig_set  = {strip_diacritics(t) for t in re.split(r"\W+", text.lower()) if t}
+
+    # diff: tokens in the corrected sentence that are new (for sidebar display)
+    corr_toks = corrected.split()
+    diff = [
+        {
+            "token":   tok,
+            "changed": strip_diacritics(re.sub(r"\W+", "", tok.lower())) not in orig_set,
+        }
+        for tok in corr_toks
+    ]
+
+    # orig_diff: tokens in the ORIGINAL sentence that will change (for cell highlighting)
+    orig_diff = [
+        {
+            "token":   tok,
+            "changed": strip_diacritics(re.sub(r"\W+", "", tok.lower())) not in corr_set,
+        }
+        for tok in text.split()
+    ]
+
+    return {
+        "row":       row_idx,
+        "original":  text,
+        "corrected": corrected,
+        "diff":      diff,
+        "orig_diff": orig_diff,
+    }
 
 
 def spellcheck_text(text: str) -> list[dict]:
     """
-    Check `text` for Tagalog words that should be Hiligaynon.
+    Check `text` for non-Ilonggo words and suggest their proper Ilonggo forms.
     Returns list of {word, start, end, suggestion, type}.
     """
     issues = []
@@ -98,13 +228,13 @@ def spellcheck_text(text: str) -> list[dict]:
         if word.isdigit() or len(word) < 2 or word[0].isupper():
             continue
         norm = strip_diacritics(word)
-        if norm in TAGALOG_MAP:
+        if norm in DIALECT_MAP:
             issues.append({
                 "word":       word,
                 "start":      m.start(),
                 "end":        m.end(),
-                "suggestion": TAGALOG_MAP[norm],
-                "type":       "tagalog",
+                "suggestion": DIALECT_MAP[norm],
+                "type":       "dialect",
             })
     return issues
 
@@ -178,41 +308,137 @@ def api_add_row():
     return jsonify({"ok": True, "total": len(data), "row": len(data) - 1})
 
 
-@app.post("/api/spellcheck/file")
-def api_spellcheck_file():
+@app.post("/api/spellcheck/batch")
+def api_spellcheck_batch():
     """
-    Run spellcheck on the HIL column of a TSV file.
-    Returns {hil_col, issues: [{row, col, cell, issues: [...]}, ...]}.
+    Check a batch of rows (current page only).
+    Body: { rows: [{row: int, text: str}, ...] }
     """
     body = request.json or {}
-    rel  = body.get("path", "")
-    path = safe_path(rel)
+    rows = body.get("rows", [])
+    results = []
+    for item in rows:
+        issues = spellcheck_text(item.get("text", ""))
+        if issues:
+            results.append({"row": item["row"], "issues": issues})
+    return jsonify({"issues": results})
+
+
+@app.post("/api/grammar/batch")
+def api_grammar_batch():
+    """
+    Run grammar correction on a batch of rows.
+    Body: { rows: [{row: int, text: str}, ...] }
+    Returns { corrections: [{row, original, corrected, diff}, ...] }
+    """
+    body = request.json or {}
+    rows = body.get("rows", [])
+    results = []
+    for item in rows:
+        result = grammar_check_sentence(item["row"], item.get("text", ""))
+        if result:
+            results.append(result)
+    return jsonify({"corrections": results})
+
+
+@app.post("/api/clean")
+def api_clean():
+    """
+    Run clean.py's validation pipeline on a TSV file.
+    Body: { path, dry_run (bool), max_tokens, min_tokens, ratio_min, ratio_max }
+    Returns:
+      steps          – [{step, count, type}]
+      removed_rows   – [{row (0-based data idx), data: [...]}]  (up to 100)
+      modified_cells – [{row, col, old, new}]
+      total_removed  – int
+      total_kept     – int
+    When dry_run=false the file is overwritten with the cleaned data.
+    """
+    if not CLEANER_OK:
+        return jsonify({"error": "pandas not available — pip install pandas"}), 503
+
+    import pandas as pd
+
+    body    = request.json or {}
+    rel     = body.get("path", "")
+    dry_run = body.get("dry_run", True)
+    path    = safe_path(rel)
     if not path or not path.exists():
         return jsonify({"error": "File not found"}), 404
 
     headers, data = read_tsv(path)
+    if not data:
+        return jsonify({"steps": [], "removed_rows": [], "modified_cells": [],
+                        "total_removed": 0, "total_kept": 0})
 
-    # Find HIL column (case-insensitive match on "hil")
-    hil_col = next(
-        (i for i, h in enumerate(headers) if "hil" in h.lower()),
-        None
+    df = pd.DataFrame(data, columns=headers)
+    args = _clean_mod.Args(
+        input      = path,
+        output     = path,
+        max_tokens = int(body.get("max_tokens", 150)),
+        min_tokens = int(body.get("min_tokens", 3)),
+        ratio_min  = float(body.get("ratio_min", 0.5)),
+        ratio_max  = float(body.get("ratio_max", 9.0)),
     )
-    if hil_col is None:
-        return jsonify({"hil_col": None, "issues": []})
 
-    all_issues = []
-    for row_idx, row in enumerate(data):
-        cell = row[hil_col] if hil_col < len(row) else ""
-        cell_issues = spellcheck_text(cell)
-        if cell_issues:
-            all_issues.append({
-                "row":    row_idx,
-                "col":    hil_col,
-                "cell":   cell,
-                "issues": cell_issues,
-            })
+    # Insert a sentinel column to track original row indices through the pipeline
+    df_work = df.copy()
+    df_work.insert(0, "__orig", range(len(df)))
 
-    return jsonify({"hil_col": hil_col, "issues": all_issues})
+    to_delete:   set[int] = set()
+    mod_cells:   list     = []
+    steps_out:   list     = []
+
+    for name, step_fn in _clean_mod.STEPS:
+        df_data = df_work.drop(columns=["__orig"])
+
+        if name == "HTML tags stripped":
+            df_after, n = step_fn(df_data, args)
+            # Collect cells that changed value
+            for ci, col_name in enumerate(headers):
+                mask = df_data.iloc[:, ci] != df_after.iloc[:, ci]
+                for idx in df_data.index[mask]:
+                    orig_i = int(df_work.at[idx, "__orig"])
+                    if orig_i not in to_delete:
+                        mod_cells.append({
+                            "row": orig_i, "col": ci,
+                            "old": df_data.at[idx, col_name],
+                            "new": df_after.at[idx, col_name],
+                        })
+            # Update data columns in-place
+            for ci, col_name in enumerate(headers):
+                df_work[col_name] = df_after.iloc[:, ci].values
+            steps_out.append({"step": name, "count": int(n), "type": "modify"})
+
+        else:
+            df_after, n = step_fn(df_data, args)
+            dropped = set(df_data.index) - set(df_after.index)
+            for idx in dropped:
+                to_delete.add(int(df_work.at[idx, "__orig"]))
+            # Keep only surviving rows (preserves __orig column)
+            df_work = df_work.loc[list(df_after.index)].reset_index(drop=True)
+            steps_out.append({"step": name, "count": int(n), "type": "delete"})
+
+    removed_rows = [
+        {"row": int(i), "data": list(df.iloc[i])}
+        for i in sorted(to_delete)
+    ]
+
+    if not dry_run:
+        # Apply HTML modifications then drop deleted rows
+        df_out = df.copy()
+        for mc in mod_cells:
+            df_out.iat[mc["row"], mc["col"]] = mc["new"]
+        df_out = df_out.drop(index=list(to_delete)).reset_index(drop=True)
+        write_tsv(path, headers, df_out.values.tolist())
+
+    return jsonify({
+        "steps":          steps_out,
+        "removed_rows":   removed_rows[:100],
+        "modified_cells": mod_cells[:50],
+        "total_removed":  len(to_delete),
+        "total_kept":     len(df) - len(to_delete),
+    })
 
 
 # ── HTML / CSS / JS (single-file SPA) ────────────────────────────────────────
@@ -278,9 +504,14 @@ td.col-actions { text-align: center; }
 .del-btn:hover { color: var(--danger); background: rgba(252,129,129,.1); }
 #empty-msg { padding: 60px; text-align: center; color: var(--muted); }
 
-/* ── spell issue cell highlight ── */
-td.hil-cell-issue { box-shadow: inset 3px 0 0 var(--spell-warn); background: rgba(246,173,85,.05); }
-td.hil-cell-issue:hover { background: rgba(246,173,85,.1); }
+/* ── spell issue highlights ── */
+td.hil-cell-issue { box-shadow: inset 3px 0 0 var(--spell-warn); }
+span.spell-err {
+  text-decoration: underline wavy #fc8181;
+  text-underline-offset: 3px;
+  cursor: help;
+  color: inherit;
+}
 
 /* ── spell sidebar ── */
 #spell-sidebar { width: 300px; flex-shrink: 0; background: var(--surface); border-left: 1px solid var(--border); display: flex; flex-direction: column; overflow: hidden; transition: width .2s ease; }
@@ -293,11 +524,25 @@ td.hil-cell-issue:hover { background: rgba(246,173,85,.1); }
 #spell-close-btn { background: transparent; border: none; color: var(--muted); cursor: pointer; font-size: 1.1rem; line-height: 1; padding: 2px 5px; border-radius: 4px; }
 #spell-close-btn:hover { color: var(--text); }
 #spell-status { padding: 6px 12px; font-size: 0.75rem; color: var(--muted); border-bottom: 1px solid var(--border); flex-shrink: 0; min-width: 300px; }
-#spell-issue-list { flex: 1; overflow-y: auto; padding: 8px; min-width: 300px; }
-.spell-card { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; transition: border-color .15s; }
+#spell-sidebar-body { flex: 1; overflow-y: auto; min-width: 300px; }
+#spell-issue-list { padding: 8px; }
+#gram-correction-list { padding: 8px; }
+.spell-card { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; transition: border-color .15s, background .15s; }
 .spell-card:hover { border-color: var(--spell-warn); }
+.spell-card.active { border-color: var(--spell-warn); background: rgba(246,173,85,.07); }
 .spell-card .row-ref { font-size: 0.7rem; color: var(--muted); margin-bottom: 5px; }
-.spell-card .issue-body { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; font-size: 0.85rem; }
+.spell-card .issue-body { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; font-size: 0.85rem; cursor: pointer; padding: 2px 0; border-radius: 4px; }
+.spell-card .issue-body:hover .word-error { text-decoration-color: #fc8181; }
+@keyframes spell-flash { 0%,100%{background:transparent;outline:none} 30%{background:rgba(252,129,129,.35);outline:2px solid #fc8181;border-radius:2px} }
+span.spell-err.flash { animation: spell-flash .7s ease; }
+span.gram-err {
+  text-decoration: underline wavy #f6ad55;
+  text-underline-offset: 3px;
+  cursor: help;
+  color: inherit;
+}
+@keyframes gram-flash { 0%,100%{background:transparent;outline:none} 30%{background:rgba(246,173,85,.35);outline:2px solid #f6ad55;border-radius:2px} }
+span.gram-err.flash { animation: gram-flash .7s ease; }
 .spell-card .word-error { color: var(--danger); text-decoration: underline wavy var(--danger); text-underline-offset: 3px; }
 .spell-card .arrow { color: var(--muted); }
 .spell-card .word-fix { color: var(--spell-fix); font-weight: 500; }
@@ -307,6 +552,56 @@ td.hil-cell-issue:hover { background: rgba(246,173,85,.1); }
 .reject-btn { flex: 1; padding: 4px 8px; border-radius: 5px; border: none; cursor: pointer; font-size: 0.75rem; background: var(--border); color: var(--muted); transition: color .15s; }
 .reject-btn:hover { color: var(--text); }
 #spell-empty { padding: 24px 16px; text-align: center; color: var(--muted); font-size: 0.82rem; }
+
+/* ── sidebar section dividers ── */
+.sidebar-section-title {
+  font-size: 0.68rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
+  color: var(--muted); padding: 10px 12px 4px; border-top: 1px solid var(--border);
+  margin-top: 4px; min-width: 300px;
+}
+.sidebar-section-title:first-child { border-top: none; margin-top: 0; }
+
+/* ── grammar cards ── */
+.gram-card { background: var(--bg); border: 1px solid #2d4a3e; border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; transition: border-color .15s, background .15s; }
+.gram-card:hover { border-color: #48bb78; }
+.gram-card.active { border-color: #48bb78; background: rgba(72,187,120,.06); }
+.gram-card .row-ref { font-size: 0.7rem; color: var(--muted); margin-bottom: 6px; }
+.gram-orig { font-size: 0.78rem; color: var(--muted); margin-bottom: 4px; white-space: pre-wrap; word-break: break-word; }
+.gram-orig span.gram-del { color: var(--danger); text-decoration: line-through; }
+.gram-fix  { font-size: 0.85rem; color: var(--text); white-space: pre-wrap; word-break: break-word; }
+.gram-fix  span.gram-ins { color: #68d391; font-weight: 500; }
+.gram-card .card-actions { display: flex; gap: 6px; margin-top: 8px; }
+.gram-accept-btn { flex: 1; padding: 4px 8px; border-radius: 5px; border: none; cursor: pointer; font-size: 0.75rem; font-weight: 500; background: rgba(72,187,120,.18); color: #68d391; transition: background .15s; }
+.gram-accept-btn:hover { background: rgba(72,187,120,.35); }
+.gram-reject-btn { flex: 1; padding: 4px 8px; border-radius: 5px; border: none; cursor: pointer; font-size: 0.75rem; background: var(--border); color: var(--muted); transition: color .15s; }
+.gram-reject-btn:hover { color: var(--text); }
+
+/* ── clean modal ── */
+#clean-backdrop { display:none; position:fixed; inset:0; background:rgba(0,0,0,.6); backdrop-filter:blur(3px); z-index:300; align-items:center; justify-content:center; }
+#clean-backdrop.open { display:flex; }
+#clean-modal { background:var(--surface); border:1px solid var(--border); border-radius:12px; width:min(640px,94vw); max-height:85vh; display:flex; flex-direction:column; box-shadow:0 24px 64px rgba(0,0,0,.6); }
+#clean-modal-header { display:flex; align-items:center; padding:14px 18px; border-bottom:1px solid var(--border); flex-shrink:0; }
+#clean-modal-header h2 { flex:1; font-size:1rem; font-weight:600; color:var(--accent); }
+#clean-modal-close { background:transparent; border:none; color:var(--muted); font-size:1.3rem; cursor:pointer; padding:2px 6px; border-radius:4px; }
+#clean-modal-close:hover { color:var(--text); }
+#clean-modal-body { overflow-y:auto; padding:16px 18px; flex:1; display:flex; flex-direction:column; gap:12px; }
+.clean-step-row { display:flex; align-items:center; gap:10px; font-size:0.85rem; padding:6px 10px; border-radius:6px; background:var(--bg); }
+.clean-step-name { flex:1; color:var(--text); }
+.clean-step-count { font-weight:600; }
+.clean-step-count.zero  { color:var(--spell-fix); }
+.clean-step-count.nonzero { color:var(--spell-warn); }
+.clean-step-type { font-size:0.72rem; color:var(--muted); background:var(--border); border-radius:4px; padding:1px 6px; }
+#clean-removed-list { display:flex; flex-direction:column; gap:4px; }
+.clean-removed-row { font-size:0.78rem; background:rgba(252,129,129,.07); border:1px solid rgba(252,129,129,.2); border-radius:6px; padding:6px 10px; }
+.clean-removed-row .clean-row-num { color:var(--muted); font-size:0.7rem; margin-bottom:3px; }
+.clean-removed-row .clean-row-data { color:var(--danger); word-break:break-all; }
+.clean-modified-row { font-size:0.78rem; background:rgba(246,173,85,.07); border:1px solid rgba(246,173,85,.2); border-radius:6px; padding:6px 10px; }
+.clean-modified-row .clean-row-num { color:var(--muted); font-size:0.7rem; margin-bottom:3px; }
+.clean-section-title { font-size:0.72rem; font-weight:700; letter-spacing:.07em; text-transform:uppercase; color:var(--muted); }
+#clean-modal-footer { display:flex; align-items:center; gap:10px; padding:12px 18px; border-top:1px solid var(--border); flex-shrink:0; }
+#clean-modal-status { flex:1; font-size:0.82rem; color:var(--muted); }
+.btn-clean { background:#744210; color:#fbd38d; border:1px solid #975a16; }
+.btn-clean:hover { opacity:.85; }
 
 /* ── row modal ── */
 #modal-backdrop { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.6); backdrop-filter: blur(3px); z-index: 200; align-items: center; justify-content: center; }
@@ -363,13 +658,20 @@ td.hil-cell-issue:hover { background: rgba(246,173,85,.1); }
 
   <div id="spell-sidebar" class="hidden">
     <div id="spell-sidebar-header">
-      <h2>Spell Check — HIL</h2>
+      <h2>HIL Checker</h2>
       <button id="run-check-btn">Run Check</button>
       <button id="spell-close-btn" title="Close sidebar">✕</button>
     </div>
     <div id="spell-status">Load a file and run check.</div>
-    <div id="spell-issue-list">
-      <div id="spell-empty">Run a check to see suggestions.</div>
+    <div id="spell-sidebar-body">
+      <div class="sidebar-section-title">Dialect (word-level)</div>
+      <div id="spell-issue-list">
+        <div id="spell-empty">Run a check to see suggestions.</div>
+      </div>
+      <div class="sidebar-section-title">Grammar (sentence-level)</div>
+      <div id="gram-correction-list">
+        <div id="gram-empty" style="padding:12px 16px;color:var(--muted);font-size:.82rem">No grammar fixes needed.</div>
+      </div>
     </div>
   </div>
 </div>
@@ -400,9 +702,10 @@ td.hil-cell-issue:hover { background: rgba(246,173,85,.1); }
 const $ = id => document.getElementById(id);
 let state = { file: '', headers: [], rows: [], filtered: [], page: 0, pageSize: 100, query: '' };
 
-// ── spell check state ─────────────────────────────────────────────────────────
-let spellIssues = [];   // [{row, col, cell, issues:[{word,start,end,suggestion,type}]}]
-let hilCol = null;
+// ── spell + grammar state ─────────────────────────────────────────────────────
+let spellIssues       = [];   // [{row, col, issues:[{word,start,end,suggestion,type}]}]
+let gramCorrections   = [];   // [{row, col, original, corrected, diff}]
+let hilCol            = null;
 
 // ── file list ────────────────────────────────────────────────────────────────
 async function loadFiles() {
@@ -433,13 +736,19 @@ async function loadFile(path) {
   state.headers = data.headers;
   state.rows    = data.rows;
   state.page    = 0;
-  // Reset spell state on new file
-  spellIssues = [];
-  hilCol = null;
-  $('spell-status').textContent = 'Load a file and run check.';
-  $('spell-issue-list').innerHTML = '<div id="spell-empty">Run a check to see suggestions.</div>';
+  // Reset spell + grammar state on new file
+  spellIssues     = [];
+  gramCorrections = [];
+  hilCol          = null;
+  $('spell-status').textContent    = 'Checking…';
+  $('spell-issue-list').innerHTML  = '';
+  $('gram-correction-list').innerHTML = '';
   applyFilter();
   $('add-row-btn').disabled = false;
+  // Auto-open sidebar and run check
+  $('spell-sidebar').classList.remove('hidden');
+  $('spell-toggle-btn').classList.add('active');
+  runSpellCheck();
 }
 
 // ── filter & paginate ────────────────────────────────────────────────────────
@@ -491,6 +800,7 @@ function render() {
   wrap.innerHTML = html;
 
   wrap.querySelectorAll('.cell-editable').forEach(td => {
+    td.addEventListener('focus', onCellFocus);
     td.addEventListener('blur', onCellBlur);
     td.addEventListener('keydown', onCellKeydown);
   });
@@ -500,6 +810,9 @@ function render() {
   wrap.querySelectorAll('td.row-num').forEach(td => {
     td.addEventListener('click', () => openModal(parseInt(td.dataset.row)));
   });
+
+  // Re-apply inline underlines for the freshly rendered page
+  applySpellHighlights();
 }
 
 function esc(s) {
@@ -507,6 +820,23 @@ function esc(s) {
 }
 
 // ── cell editing ─────────────────────────────────────────────────────────────
+function onCellFocus(e) {
+  const td = e.target;
+  // Strip highlight spans so editing is clean plain text
+  if (td.querySelector('span.spell-err, span.gram-err')) {
+    const row = parseInt(td.dataset.row);
+    const col = parseInt(td.dataset.col);
+    td.textContent = state.rows[row][col];
+    // Restore cursor to end
+    const range = document.createRange();
+    range.selectNodeContents(td);
+    range.collapse(false);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+  }
+}
+
 function onCellKeydown(e) {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); e.target.blur(); }
   if (e.key === 'Escape') { e.target.blur(); }
@@ -661,33 +991,120 @@ function toggleSpellSidebar() {
   $('spell-toggle-btn').classList.toggle('active', !isHidden);
 }
 
+// Build cell HTML combining spell (red wavy) and grammar (amber wavy) highlights.
+// spellIssues: [{start, end, word, suggestion}]
+// gramOrigDiff: [{token, changed}]  — tokens from the original sentence
+function buildCellHtml(text, spellIssues, gramOrigDiff) {
+  const ranges = [];
+
+  // Spell ranges come with exact char positions
+  for (const iss of (spellIssues || [])) {
+    ranges.push({ start: iss.start, end: iss.end, cls: 'spell-err', title: `Use: ${iss.suggestion}` });
+  }
+
+  // Grammar ranges: find each changed token's position in the original text
+  if (gramOrigDiff) {
+    let searchFrom = 0;
+    for (const tok of gramOrigDiff) {
+      const idx = text.indexOf(tok.token, searchFrom);
+      if (idx === -1) continue;
+      const end = idx + tok.token.length;
+      if (tok.changed) {
+        // Only add if not already covered by a spell range
+        const covered = ranges.some(r => r.start <= idx && r.end >= end);
+        if (!covered) {
+          ranges.push({ start: idx, end, cls: 'gram-err', title: 'Grammar: Ilonggo form needed' });
+        }
+      }
+      searchFrom = end;
+    }
+  }
+
+  ranges.sort((a, b) => a.start - b.start);
+  let result = '', pos = 0;
+  for (const r of ranges) {
+    if (r.start < pos) continue;
+    result += esc(text.slice(pos, r.start));
+    result += `<span class="${r.cls}" title="${esc(r.title)}">${esc(text.slice(r.start, r.end))}</span>`;
+    pos = r.end;
+  }
+  return result + esc(text.slice(pos));
+}
+
+// Apply inline highlights (spell + grammar) to all visible HIL cells
+function applyAllHighlights() {
+  if (hilCol === null) return;
+  const spellMap = new Map(spellIssues.map(ri => [ri.row, ri.issues]));
+  const gramMap  = new Map(gramCorrections.map(c  => [c.row,  c.orig_diff]));
+
+  document.querySelectorAll(`.cell-editable[data-col="${hilCol}"]`).forEach(td => {
+    if (document.activeElement === td) return;
+    const row       = parseInt(td.dataset.row);
+    const sIssues   = spellMap.get(row);
+    const gOrigDiff = gramMap.get(row);
+    if (!sIssues?.length && !gOrigDiff) return;
+    td.innerHTML = buildCellHtml(state.rows[row][hilCol], sIssues, gOrigDiff);
+  });
+}
+
+// Keep old name as alias so existing callers don't break
+const applySpellHighlights = applyAllHighlights;
+
 async function runSpellCheck() {
   if (!state.file) { showToast('Load a file first', true); return; }
-  $('run-check-btn').disabled   = true;
-  $('spell-status').textContent = 'Checking…';
-  $('spell-issue-list').innerHTML = '';
 
-  const res = await fetch('/api/spellcheck/file', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ path: state.file })
-  });
-  $('run-check-btn').disabled = false;
-
-  if (!res.ok) { showToast('Spell check failed', true); $('spell-status').textContent = 'Check failed.'; return; }
-
-  const data = await res.json();
-  hilCol      = data.hil_col;
-  spellIssues = data.issues;
-
-  if (hilCol === null) {
+  hilCol = state.headers.findIndex(h => h.toLowerCase().includes('hil'));
+  if (hilCol === -1) {
     $('spell-status').textContent = 'No HIL column found in this file.';
-    $('spell-issue-list').innerHTML = '<div id="spell-empty">No HIL column detected.</div>';
+    $('spell-issue-list').innerHTML  = '<div id="spell-empty">No HIL column detected.</div>';
+    $('gram-correction-list').innerHTML = '<div id="gram-empty" style="padding:12px 16px;color:var(--muted);font-size:.82rem">—</div>';
     return;
   }
 
+  $('run-check-btn').disabled      = true;
+  $('spell-status').textContent    = 'Checking…';
+  $('spell-issue-list').innerHTML  = '';
+  $('gram-correction-list').innerHTML = '';
+
+  const rows = pageSlice().map(({ r, i }) => ({ row: i, text: r[hilCol] || '' }));
+  const body = JSON.stringify({ rows });
+  const opts = { method: 'POST', headers: { 'Content-Type': 'application/json' }, body };
+
+  // Run both checks in parallel
+  const [spellRes, gramRes] = await Promise.all([
+    fetch('/api/spellcheck/batch', opts),
+    fetch('/api/grammar/batch',    opts),
+  ]);
+  $('run-check-btn').disabled = false;
+
+  if (!spellRes.ok || !gramRes.ok) {
+    showToast('Check failed', true);
+    $('spell-status').textContent = 'Check failed.';
+    return;
+  }
+
+  const [spellData, gramData] = await Promise.all([spellRes.json(), gramRes.json()]);
+
+  spellIssues     = spellData.issues.map(ri => ({ ...ri, col: hilCol }));
+  gramCorrections = gramData.corrections.map(c => ({ ...c, col: hilCol }));
+
+  renderSidebarStatus();
   renderSpellIssues();
-  render(); // Re-render table to apply cell highlights
+  renderGrammarCorrections();
+  applySpellHighlights();
+}
+
+function renderSidebarStatus() {
+  const sc = spellIssues.reduce((s, r) => s + r.issues.length, 0);
+  const gc = gramCorrections.length;
+  if (sc === 0 && gc === 0) {
+    $('spell-status').textContent = 'No issues — HIL column looks good!';
+  } else {
+    const parts = [];
+    if (sc) parts.push(`${sc} spelling`);
+    if (gc) parts.push(`${gc} grammar fix${gc !== 1 ? 'es' : ''}`);
+    $('spell-status').textContent = parts.join(' · ');
+  }
 }
 
 function renderSpellIssues() {
@@ -695,21 +1112,20 @@ function renderSpellIssues() {
   const total = spellIssues.reduce((s, r) => s + r.issues.length, 0);
 
   if (total === 0) {
-    $('spell-status').textContent = 'No issues found — HIL column looks good!';
-    list.innerHTML = '<div id="spell-empty" style="padding:24px 16px;text-align:center;color:var(--spell-fix);font-size:.85rem">All clear!</div>';
+    list.innerHTML = '<div style="padding:12px 16px;text-align:center;color:var(--spell-fix);font-size:.82rem">All clear!</div>';
     return;
   }
-
-  $('spell-status').textContent = `${total} issue${total !== 1 ? 's' : ''} in ${spellIssues.length} row${spellIssues.length !== 1 ? 's' : ''}`;
   list.innerHTML = '';
 
   spellIssues.forEach((rowIssue, ri) => {
     rowIssue.issues.forEach((issue, ii) => {
       const card = document.createElement('div');
       card.className = 'spell-card';
+      card.dataset.ri = ri;
+      card.dataset.ii = ii;
       card.innerHTML = `
         <div class="row-ref">Row ${rowIssue.row + 1} &mdash; HIL column</div>
-        <div class="issue-body">
+        <div class="issue-body" data-ri="${ri}" data-ii="${ii}" title="Click to jump to word">
           <span class="word-error">${esc(issue.word)}</span>
           <span class="arrow">&#8594;</span>
           <span class="word-fix">${esc(issue.suggestion)}</span>
@@ -722,8 +1138,193 @@ function renderSpellIssues() {
     });
   });
 
+  list.querySelectorAll('.issue-body').forEach(el => el.addEventListener('click', e => {
+    scrollToIssue(parseInt(e.currentTarget.dataset.ri), parseInt(e.currentTarget.dataset.ii));
+  }));
   list.querySelectorAll('.accept-btn').forEach(btn => btn.addEventListener('click', onAcceptIssue));
   list.querySelectorAll('.reject-btn').forEach(btn => btn.addEventListener('click', onRejectIssue));
+}
+
+// ── grammar rendering ─────────────────────────────────────────────────────────
+
+function buildGrammarDiffHtml(original, corrected, diff) {
+  // Corrected sentence with changed tokens highlighted green
+  const corrHtml = diff.map(tok =>
+    tok.changed
+      ? `<span class="gram-ins">${esc(tok.token)}</span>`
+      : esc(tok.token)
+  ).join(' ');
+
+  // Original sentence with changed positions struck out
+  const origToks = original.split(/\s+/);
+  const origHtml = origToks.map((tok, i) => {
+    const corrTok = diff[i];
+    const changed = corrTok && corrTok.changed && corrTok.token.toLowerCase() !== tok.toLowerCase();
+    return changed ? `<span class="gram-del">${esc(tok)}</span>` : esc(tok);
+  }).join(' ');
+
+  return { origHtml, corrHtml };
+}
+
+function renderGrammarCorrections() {
+  const list = $('gram-correction-list');
+
+  if (gramCorrections.length === 0) {
+    list.innerHTML = '<div style="padding:12px 16px;color:var(--spell-fix);font-size:.82rem;text-align:center">All clear!</div>';
+    return;
+  }
+
+  list.innerHTML = '';
+  gramCorrections.forEach((corr, gi) => {
+    const { origHtml, corrHtml } = buildGrammarDiffHtml(corr.original, corr.corrected, corr.diff);
+    const card = document.createElement('div');
+    card.className = 'gram-card';
+    card.dataset.gi = gi;
+    card.innerHTML = `
+      <div class="row-ref gram-card-nav" data-gi="${gi}" title="Click to jump to row" style="cursor:pointer">
+        Row ${corr.row + 1} &mdash; HIL column
+      </div>
+      <div class="gram-orig gram-card-nav" data-gi="${gi}" title="Click to jump to row" style="cursor:pointer">${origHtml}</div>
+      <div class="gram-fix">${corrHtml}</div>
+      <div class="card-actions">
+        <button class="gram-accept-btn" data-gi="${gi}">Accept Fix</button>
+        <button class="gram-reject-btn" data-gi="${gi}">Ignore</button>
+      </div>`;
+    list.appendChild(card);
+  });
+
+  list.querySelectorAll('.gram-card-nav').forEach(el =>
+    el.addEventListener('click', e => scrollToGrammar(parseInt(e.currentTarget.dataset.gi)))
+  );
+  list.querySelectorAll('.gram-accept-btn').forEach(btn => btn.addEventListener('click', onAcceptGrammar));
+  list.querySelectorAll('.gram-reject-btn').forEach(btn => btn.addEventListener('click', onRejectGrammar));
+}
+
+function scrollToGrammar(gi) {
+  const corr = gramCorrections[gi];
+  if (!corr) return;
+
+  // Mark card active
+  $('gram-correction-list').querySelectorAll('.gram-card').forEach(c => c.classList.remove('active'));
+  const activeCard = $('gram-correction-list').querySelector(`.gram-card[data-gi="${gi}"]`);
+  if (activeCard) activeCard.classList.add('active');
+
+  // Navigate to the right page if needed
+  const inPage = pageSlice().some(({ i }) => i === corr.row);
+  if (!inPage) {
+    const filtIdx = state.filtered.findIndex(f => f.i === corr.row);
+    if (filtIdx !== -1) state.page = Math.floor(filtIdx / state.pageSize);
+    render();
+  }
+
+  // Scroll row into view
+  const tr = document.querySelector(`tr[data-row="${corr.row}"]`);
+  if (tr) tr.scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+  // Flash all gram-err spans in that cell
+  const td = document.querySelector(
+    `td.cell-editable[data-row="${corr.row}"][data-col="${corr.col}"]`
+  );
+  if (td) {
+    td.querySelectorAll('span.gram-err').forEach(span => {
+      span.classList.remove('flash');
+      void span.offsetWidth;
+      span.classList.add('flash');
+      setTimeout(() => span.classList.remove('flash'), 750);
+    });
+  }
+}
+
+async function onAcceptGrammar(e) {
+  const gi   = parseInt(e.target.dataset.gi);
+  const corr = gramCorrections[gi];
+  if (!corr) return;
+
+  const res = await fetch('/api/tsv/cell', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path: state.file, row: corr.row, col: corr.col, value: corr.corrected })
+  });
+  if (!res.ok) { showToast('Save failed', true); return; }
+
+  // Update in-memory state
+  state.rows[corr.row][corr.col] = corr.corrected;
+
+  // Update the visible cell (clear highlights, show corrected plain text)
+  const td = document.querySelector(`td.cell-editable[data-row="${corr.row}"][data-col="${corr.col}"]`);
+  if (td && document.activeElement !== td) {
+    td.textContent = corr.corrected;
+    td.classList.remove('hil-cell-issue');
+  }
+  // Mark row as changed
+  const tr = document.querySelector(`tr[data-row="${corr.row}"]`);
+  if (tr) tr.classList.add('changed');
+
+  // Drop resolved spell issues for this row
+  spellIssues     = spellIssues.filter(ri => ri.row !== corr.row);
+  gramCorrections.splice(gi, 1);
+
+  showToast('Grammar fix applied');
+  renderSidebarStatus();
+  renderSpellIssues();
+  renderGrammarCorrections();
+  applyAllHighlights();
+}
+
+function onRejectGrammar(e) {
+  const gi   = parseInt(e.target.dataset.gi);
+  const corr = gramCorrections[gi];
+  // Clear the amber underlines for this row
+  const td = document.querySelector(`td.cell-editable[data-row="${corr.row}"][data-col="${corr.col}"]`);
+  gramCorrections.splice(gi, 1);
+  // Re-apply (may still have spell highlights)
+  if (td && document.activeElement !== td) {
+    const sIssues = spellIssues.find(ri => ri.row === corr.row)?.issues;
+    td.innerHTML = buildCellHtml(state.rows[corr.row][corr.col], sIssues, null);
+    if (!sIssues?.length) td.classList.remove('hil-cell-issue');
+  }
+  renderSidebarStatus();
+  renderGrammarCorrections();
+}
+
+function scrollToIssue(ri, ii) {
+  const rowIssue = spellIssues[ri];
+  if (!rowIssue) return;
+  const issue = rowIssue.issues[ii];
+
+  // Mark the card as active
+  $('spell-issue-list').querySelectorAll('.spell-card').forEach(c => c.classList.remove('active'));
+  const activeCard = $('spell-issue-list').querySelector(`.spell-card[data-ri="${ri}"][data-ii="${ii}"]`);
+  if (activeCard) activeCard.classList.add('active');
+
+  // If the row is on a different page, navigate there first
+  const pageStart = state.page * state.pageSize;
+  const pageEnd   = pageStart + state.pageSize;
+  if (rowIssue.row < pageStart || rowIssue.row >= pageEnd) {
+    state.page = Math.floor(
+      state.filtered.findIndex(f => f.i === rowIssue.row) / state.pageSize
+    );
+    render(); // re-renders and re-applies highlights via applySpellHighlights
+  }
+
+  // Scroll the row into view
+  const tr = document.querySelector(`tr[data-row="${rowIssue.row}"]`);
+  if (tr) tr.scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+  // Flash the specific span inside the HIL cell
+  const td = document.querySelector(
+    `td.cell-editable[data-row="${rowIssue.row}"][data-col="${rowIssue.col}"]`
+  );
+  if (td) {
+    td.querySelectorAll('span.spell-err').forEach(span => {
+      if (span.textContent === issue.word) {
+        span.classList.remove('flash');
+        void span.offsetWidth; // force reflow to restart animation
+        span.classList.add('flash');
+        setTimeout(() => span.classList.remove('flash'), 750);
+      }
+    });
+  }
 }
 
 function escapeRegex(str) {
@@ -737,7 +1338,7 @@ async function onAcceptIssue(e) {
   const issue    = rowIssue.issues[ii];
 
   const currentVal = state.rows[rowIssue.row][rowIssue.col];
-  // Replace all occurrences of the Tagalog word (word-boundary aware)
+  // Replace all occurrences with the proper Ilonggo form (word-boundary aware)
   const newVal = currentVal.replace(
     new RegExp('\\b' + escapeRegex(issue.word) + '\\b', 'g'),
     issue.suggestion
@@ -776,14 +1377,24 @@ function onRejectIssue(e) {
 function removeIssue(ri, ii) {
   const rowIssue = spellIssues[ri];
   rowIssue.issues.splice(ii, 1);
+  const td = document.querySelector(
+    `td.cell-editable[data-row="${rowIssue.row}"][data-col="${rowIssue.col}"]`
+  );
   if (rowIssue.issues.length === 0) {
-    // Remove cell highlight
-    const td = document.querySelector(
-      `td.cell-editable[data-row="${rowIssue.row}"][data-col="${rowIssue.col}"]`
-    );
-    if (td) td.classList.remove('hil-cell-issue');
     spellIssues.splice(ri, 1);
+    // Clear all highlights on this cell
+    if (td && document.activeElement !== td) {
+      td.textContent = state.rows[rowIssue.row][rowIssue.col];
+      td.classList.remove('hil-cell-issue');
+    }
+  } else {
+    // Re-apply remaining underlines
+    if (td && document.activeElement !== td) {
+      const gd = gramCorrections.find(c => c.row === rowIssue.row)?.orig_diff;
+      td.innerHTML = buildCellHtml(state.rows[rowIssue.row][rowIssue.col], rowIssue.issues, gd);
+    }
   }
+  renderSidebarStatus();
   renderSpellIssues();
 }
 
@@ -797,8 +1408,8 @@ $('spell-close-btn').addEventListener('click', () => {
 // ── controls ─────────────────────────────────────────────────────────────────
 $('file-select').addEventListener('change', e => { if (e.target.value) loadFile(e.target.value); });
 $('search-box').addEventListener('input', e => { state.query = e.target.value; applyFilter(); });
-$('prev-btn').addEventListener('click', () => { state.page--; render(); $('table-wrap').scrollTop = 0; });
-$('next-btn').addEventListener('click', () => { state.page++; render(); $('table-wrap').scrollTop = 0; });
+$('prev-btn').addEventListener('click', () => { state.page--; render(); $('table-wrap').scrollTop = 0; if (state.file) runSpellCheck(); });
+$('next-btn').addEventListener('click', () => { state.page++; render(); $('table-wrap').scrollTop = 0; if (state.file) runSpellCheck(); });
 $('page-size').addEventListener('change', e => { state.pageSize = parseInt(e.target.value); applyFilter(); });
 
 // ── toast ─────────────────────────────────────────────────────────────────────
@@ -821,5 +1432,5 @@ loadFiles();
 
 if __name__ == "__main__":
     print("TSV Editor running at http://localhost:5000")
-    print(f"Loaded {len(TAGALOG_MAP)} Tagalog→Hiligaynon mappings for spell check.")
+    print(f"Loaded {len(DIALECT_MAP)} Hiligaynon→Ilonggo dialect mappings.")
     app.run(debug=True, port=5000)
