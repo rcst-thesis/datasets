@@ -1,0 +1,17 @@
+pattern,replacement
+magandang\s+umaga,maayo nga aga
+magandang\s+hapon,maayo nga hapon
+magandang\s+gabi,maayo nga gab-i
+kumusta\s+ka,kamusta ka
+matutulog\s+na\s+ako,magturog na ako
+kumain\s+ka\s+na\s+ba,nakaon ka na bala
+kakain\s+ka\s+na\s+ba,magakaon ka na bala
+saan\s+ka\s+pupunta,diin ka makadto
+anong\s+pangalan\s+mo,ano ngalan mo
+mahal\s+kita,palangga ko ikaw
+salamat\s+po,salamat gid
+hindi\s+ko\s+alam,indi ko kahibalo
+hindi\s+ko\s+gusto,indi ko gusto
+huwag\s+mo,indi mo
+tara\s+na,dali na
+ingat\s+ka,halong ka

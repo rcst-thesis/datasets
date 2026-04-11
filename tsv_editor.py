@@ -6,10 +6,13 @@ Then open http://localhost:5000
 
 import csv
 import os
+import re
+import unicodedata
 from pathlib import Path
 from flask import Flask, jsonify, render_template_string, request
 
-BASE_DIR = Path(__file__).parent
+BASE_DIR  = Path(__file__).parent
+SPELL_DIR = BASE_DIR / "spell-checker"
 app = Flask(__name__)
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -26,7 +29,7 @@ def safe_path(rel: str) -> Path | None:
     """Resolve a relative path; return None if it escapes BASE_DIR."""
     try:
         resolved = (BASE_DIR / rel).resolve()
-        resolved.relative_to(BASE_DIR.resolve())  # raises ValueError if outside
+        resolved.relative_to(BASE_DIR.resolve())
         return resolved
     except (ValueError, Exception):
         return None
@@ -40,7 +43,6 @@ def read_tsv(path: Path) -> tuple[list[str], list[list[str]]]:
         return [], []
     headers = rows[0]
     data = rows[1:]
-    # Normalise row widths
     ncols = len(headers)
     data = [r + [""] * (ncols - len(r)) if len(r) < ncols else r[:ncols] for r in data]
     return headers, data
@@ -51,6 +53,60 @@ def write_tsv(path: Path, headers: list[str], data: list[list[str]]) -> None:
         writer = csv.writer(f, delimiter="\t")
         writer.writerow(headers)
         writer.writerows(data)
+
+
+# ── spellcheck ────────────────────────────────────────────────────────────────
+
+def strip_diacritics(text: str) -> str:
+    """Normalize Unicode diacritics (e.g. á → a, í → i)."""
+    nfd = unicodedata.normalize("NFD", text)
+    return "".join(c for c in nfd if unicodedata.category(c) != "Mn").lower()
+
+
+def build_tagalog_map() -> dict[str, str]:
+    """
+    Load {normalized_tagalog_word: hiligaynon_replacement} from
+    spell-checker/words.csv and spell-checker/verbs.csv.
+    """
+    mapping: dict[str, str] = {}
+    for fname in ("words.csv", "verbs.csv"):
+        fp = SPELL_DIR / fname
+        if not fp.exists():
+            continue
+        with open(fp, encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                base   = strip_diacritics(row["base_word"].strip())
+                target = row["target_word"].strip()
+                if base and target:
+                    mapping[base] = target
+    return mapping
+
+
+# Load once at startup
+TAGALOG_MAP: dict[str, str] = build_tagalog_map()
+
+
+def spellcheck_text(text: str) -> list[dict]:
+    """
+    Check `text` for Tagalog words that should be Hiligaynon.
+    Returns list of {word, start, end, suggestion, type}.
+    """
+    issues = []
+    for m in re.finditer(r"[\w'-]+", text):
+        word = m.group()
+        # Skip numbers, very short tokens, and proper nouns (capitalized)
+        if word.isdigit() or len(word) < 2 or word[0].isupper():
+            continue
+        norm = strip_diacritics(word)
+        if norm in TAGALOG_MAP:
+            issues.append({
+                "word":       word,
+                "start":      m.start(),
+                "end":        m.end(),
+                "suggestion": TAGALOG_MAP[norm],
+                "type":       "tagalog",
+            })
+    return issues
 
 
 # ── routes ───────────────────────────────────────────────────────────────────
@@ -67,7 +123,7 @@ def api_files():
 
 @app.get("/api/tsv")
 def api_get_tsv():
-    rel = request.args.get("path", "")
+    rel  = request.args.get("path", "")
     path = safe_path(rel)
     if not path or not path.exists():
         return jsonify({"error": "File not found"}), 404
@@ -122,6 +178,43 @@ def api_add_row():
     return jsonify({"ok": True, "total": len(data), "row": len(data) - 1})
 
 
+@app.post("/api/spellcheck/file")
+def api_spellcheck_file():
+    """
+    Run spellcheck on the HIL column of a TSV file.
+    Returns {hil_col, issues: [{row, col, cell, issues: [...]}, ...]}.
+    """
+    body = request.json or {}
+    rel  = body.get("path", "")
+    path = safe_path(rel)
+    if not path or not path.exists():
+        return jsonify({"error": "File not found"}), 404
+
+    headers, data = read_tsv(path)
+
+    # Find HIL column (case-insensitive match on "hil")
+    hil_col = next(
+        (i for i, h in enumerate(headers) if "hil" in h.lower()),
+        None
+    )
+    if hil_col is None:
+        return jsonify({"hil_col": None, "issues": []})
+
+    all_issues = []
+    for row_idx, row in enumerate(data):
+        cell = row[hil_col] if hil_col < len(row) else ""
+        cell_issues = spellcheck_text(cell)
+        if cell_issues:
+            all_issues.append({
+                "row":    row_idx,
+                "col":    hil_col,
+                "cell":   cell,
+                "issues": cell_issues,
+            })
+
+    return jsonify({"hil_col": hil_col, "issues": all_issues})
+
+
 # ── HTML / CSS / JS (single-file SPA) ────────────────────────────────────────
 
 HTML_TEMPLATE = r"""<!doctype html>
@@ -137,21 +230,24 @@ HTML_TEMPLATE = r"""<!doctype html>
   --accent: #6c63ff; --accent2: #ff6584;
   --text: #e2e8f0; --muted: #718096; --danger: #fc8181;
   --row-hover: #1e2235; --edit-bg: #252a3d;
+  --spell-warn: #f6ad55; --spell-fix: #68d391;
   font-size: 14px;
 }
 body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', system-ui, sans-serif; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
 
 /* ── top bar ── */
-header { display: flex; align-items: center; gap: 12px; padding: 10px 16px; background: var(--surface); border-bottom: 1px solid var(--border); flex-shrink: 0; }
+header { display: flex; align-items: center; gap: 12px; padding: 10px 16px; background: var(--surface); border-bottom: 1px solid var(--border); flex-shrink: 0; flex-wrap: wrap; }
 header h1 { font-size: 1.05rem; font-weight: 600; color: var(--accent); white-space: nowrap; }
 #file-select { flex: 1; max-width: 420px; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 5px 10px; font-size: 0.9rem; }
-#search-box { flex: 1; max-width: 260px; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 5px 10px; font-size: 0.9rem; }
+#search-box { flex: 1; max-width: 240px; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 5px 10px; font-size: 0.9rem; }
 #search-box::placeholder { color: var(--muted); }
 .badge { background: var(--border); color: var(--muted); border-radius: 999px; padding: 2px 10px; font-size: 0.78rem; white-space: nowrap; }
 .btn { padding: 5px 14px; border-radius: 6px; border: none; cursor: pointer; font-size: 0.85rem; font-weight: 500; transition: opacity .15s; }
 .btn:hover { opacity: .8; }
 .btn-primary { background: var(--accent); color: #fff; }
 .btn-danger  { background: var(--danger); color: #fff; }
+.btn-spell   { background: #744210; color: #fbd38d; border: 1px solid #975a16; }
+.btn-spell.active { background: #975a16; }
 
 /* ── pagination ── */
 #pager { display: flex; align-items: center; gap: 8px; padding: 6px 16px; background: var(--surface); border-bottom: 1px solid var(--border); flex-shrink: 0; }
@@ -159,6 +255,9 @@ header h1 { font-size: 1.05rem; font-weight: 600; color: var(--accent); white-sp
 #pager button { background: var(--border); color: var(--text); border: none; border-radius: 5px; padding: 3px 10px; cursor: pointer; font-size: 0.82rem; }
 #pager button:disabled { opacity: .35; cursor: default; }
 #page-size { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 5px; padding: 2px 6px; font-size: 0.82rem; }
+
+/* ── main content area (table + sidebar) ── */
+#main-content { flex: 1; display: flex; overflow: hidden; }
 
 /* ── table area ── */
 #table-wrap { flex: 1; overflow: auto; }
@@ -171,6 +270,43 @@ tbody tr.changed { border-left: 3px solid var(--accent2); }
 td { padding: 5px 10px; border-bottom: 1px solid var(--border); vertical-align: top; word-break: break-word; }
 td.row-num { color: var(--muted); font-size: 0.78rem; text-align: right; user-select: none; cursor: pointer; border-radius: 4px; transition: color .15s, background .15s; }
 td.row-num:hover { color: var(--accent); background: rgba(108,99,255,.12); }
+td.cell-editable { cursor: text; white-space: pre-wrap; min-height: 28px; }
+td.cell-editable:focus { outline: 2px solid var(--accent); background: var(--edit-bg); border-radius: 3px; }
+td.cell-editable.saving { opacity: .5; }
+td.col-actions { text-align: center; }
+.del-btn { background: transparent; border: none; cursor: pointer; color: var(--muted); font-size: 1rem; line-height: 1; padding: 2px 5px; border-radius: 4px; }
+.del-btn:hover { color: var(--danger); background: rgba(252,129,129,.1); }
+#empty-msg { padding: 60px; text-align: center; color: var(--muted); }
+
+/* ── spell issue cell highlight ── */
+td.hil-cell-issue { box-shadow: inset 3px 0 0 var(--spell-warn); background: rgba(246,173,85,.05); }
+td.hil-cell-issue:hover { background: rgba(246,173,85,.1); }
+
+/* ── spell sidebar ── */
+#spell-sidebar { width: 300px; flex-shrink: 0; background: var(--surface); border-left: 1px solid var(--border); display: flex; flex-direction: column; overflow: hidden; transition: width .2s ease; }
+#spell-sidebar.hidden { width: 0; border-left: none; }
+#spell-sidebar-header { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--border); flex-shrink: 0; min-width: 300px; }
+#spell-sidebar-header h2 { font-size: 0.85rem; font-weight: 600; color: var(--spell-warn); flex: 1; white-space: nowrap; }
+#run-check-btn { padding: 3px 10px; border-radius: 5px; border: none; cursor: pointer; font-size: 0.78rem; background: rgba(246,173,85,.2); color: var(--spell-warn); font-weight: 500; white-space: nowrap; }
+#run-check-btn:hover { background: rgba(246,173,85,.35); }
+#run-check-btn:disabled { opacity: .4; cursor: default; }
+#spell-close-btn { background: transparent; border: none; color: var(--muted); cursor: pointer; font-size: 1.1rem; line-height: 1; padding: 2px 5px; border-radius: 4px; }
+#spell-close-btn:hover { color: var(--text); }
+#spell-status { padding: 6px 12px; font-size: 0.75rem; color: var(--muted); border-bottom: 1px solid var(--border); flex-shrink: 0; min-width: 300px; }
+#spell-issue-list { flex: 1; overflow-y: auto; padding: 8px; min-width: 300px; }
+.spell-card { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; transition: border-color .15s; }
+.spell-card:hover { border-color: var(--spell-warn); }
+.spell-card .row-ref { font-size: 0.7rem; color: var(--muted); margin-bottom: 5px; }
+.spell-card .issue-body { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; font-size: 0.85rem; }
+.spell-card .word-error { color: var(--danger); text-decoration: underline wavy var(--danger); text-underline-offset: 3px; }
+.spell-card .arrow { color: var(--muted); }
+.spell-card .word-fix { color: var(--spell-fix); font-weight: 500; }
+.spell-card .card-actions { display: flex; gap: 6px; margin-top: 8px; }
+.accept-btn { flex: 1; padding: 4px 8px; border-radius: 5px; border: none; cursor: pointer; font-size: 0.75rem; font-weight: 500; background: rgba(104,211,145,.18); color: var(--spell-fix); transition: background .15s; }
+.accept-btn:hover { background: rgba(104,211,145,.35); }
+.reject-btn { flex: 1; padding: 4px 8px; border-radius: 5px; border: none; cursor: pointer; font-size: 0.75rem; background: var(--border); color: var(--muted); transition: color .15s; }
+.reject-btn:hover { color: var(--text); }
+#spell-empty { padding: 24px 16px; text-align: center; color: var(--muted); font-size: 0.82rem; }
 
 /* ── row modal ── */
 #modal-backdrop { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.6); backdrop-filter: blur(3px); z-index: 200; align-items: center; justify-content: center; }
@@ -190,13 +326,8 @@ td.row-num:hover { color: var(--accent); background: rgba(108,99,255,.12); }
 .modal-field textarea:focus { outline: none; border-color: var(--accent); }
 #modal-footer { display: flex; align-items: center; justify-content: flex-end; gap: 10px; padding: 12px 18px; border-top: 1px solid var(--border); flex-shrink: 0; }
 #modal-status { color: var(--muted); font-size: 0.82rem; flex: 1; }
-td.cell-editable { cursor: text; white-space: pre-wrap; min-height: 28px; }
-td.cell-editable:focus { outline: 2px solid var(--accent); background: var(--edit-bg); border-radius: 3px; }
-td.cell-editable.saving { opacity: .5; }
-td.col-actions { text-align: center; }
-.del-btn { background: transparent; border: none; cursor: pointer; color: var(--muted); font-size: 1rem; line-height: 1; padding: 2px 5px; border-radius: 4px; }
-.del-btn:hover { color: var(--danger); background: rgba(252,129,129,.1); }
-#empty-msg { padding: 60px; text-align: center; color: var(--muted); }
+
+/* ── toast ── */
 .toast { position: fixed; bottom: 20px; right: 20px; background: #2d3748; color: #fff; padding: 10px 18px; border-radius: 8px; font-size: 0.85rem; opacity: 0; transition: opacity .25s; pointer-events: none; z-index: 100; }
 .toast.show { opacity: 1; }
 </style>
@@ -209,6 +340,7 @@ td.col-actions { text-align: center; }
   <input id="search-box" type="search" placeholder="Search rows…">
   <span id="row-count" class="badge">0 rows</span>
   <button class="btn btn-primary" id="add-row-btn" disabled>+ Row</button>
+  <button class="btn btn-spell" id="spell-toggle-btn">Spell Check</button>
 </header>
 
 <div id="pager">
@@ -224,8 +356,22 @@ td.col-actions { text-align: center; }
   </select>
 </div>
 
-<div id="table-wrap">
-  <div id="empty-msg">Select a TSV file to begin.</div>
+<div id="main-content">
+  <div id="table-wrap">
+    <div id="empty-msg">Select a TSV file to begin.</div>
+  </div>
+
+  <div id="spell-sidebar" class="hidden">
+    <div id="spell-sidebar-header">
+      <h2>Spell Check — HIL</h2>
+      <button id="run-check-btn">Run Check</button>
+      <button id="spell-close-btn" title="Close sidebar">✕</button>
+    </div>
+    <div id="spell-status">Load a file and run check.</div>
+    <div id="spell-issue-list">
+      <div id="spell-empty">Run a check to see suggestions.</div>
+    </div>
+  </div>
 </div>
 
 <div class="toast" id="toast"></div>
@@ -253,13 +399,16 @@ td.col-actions { text-align: center; }
 <script>
 const $ = id => document.getElementById(id);
 let state = { file: '', headers: [], rows: [], filtered: [], page: 0, pageSize: 100, query: '' };
-let saveTimer = null;
+
+// ── spell check state ─────────────────────────────────────────────────────────
+let spellIssues = [];   // [{row, col, cell, issues:[{word,start,end,suggestion,type}]}]
+let hilCol = null;
 
 // ── file list ────────────────────────────────────────────────────────────────
 async function loadFiles() {
-  const res = await fetch('/api/files');
+  const res   = await fetch('/api/files');
   const files = await res.json();
-  const sel = $('file-select');
+  const sel   = $('file-select');
   const groups = {};
   files.forEach(f => { (groups[f.dir] = groups[f.dir] || []).push(f); });
   Object.entries(groups).forEach(([dir, list]) => {
@@ -280,10 +429,15 @@ async function loadFile(path) {
   const res = await fetch('/api/tsv?path=' + encodeURIComponent(path));
   if (!res.ok) { showToast('Failed to load file', true); return; }
   const data = await res.json();
-  state.file = path;
+  state.file    = path;
   state.headers = data.headers;
-  state.rows = data.rows;
-  state.page = 0;
+  state.rows    = data.rows;
+  state.page    = 0;
+  // Reset spell state on new file
+  spellIssues = [];
+  hilCol = null;
+  $('spell-status').textContent = 'Load a file and run check.';
+  $('spell-issue-list').innerHTML = '<div id="spell-empty">Run a check to see suggestions.</div>';
   applyFilter();
   $('add-row-btn').disabled = false;
 }
@@ -305,16 +459,17 @@ function pageSlice() {
 
 // ── render ───────────────────────────────────────────────────────────────────
 function render() {
-  const wrap = $('table-wrap');
+  const wrap  = $('table-wrap');
   const total = state.filtered.length;
   const pages = Math.max(1, Math.ceil(total / state.pageSize));
-  $('row-count').textContent = total + ' rows';
-  $('page-info').textContent = `Page ${state.page + 1} / ${pages}`;
-  $('prev-btn').disabled = state.page === 0;
-  $('next-btn').disabled = state.page >= pages - 1;
+  $('row-count').textContent  = total + ' rows';
+  $('page-info').textContent  = `Page ${state.page + 1} / ${pages}`;
+  $('prev-btn').disabled      = state.page === 0;
+  $('next-btn').disabled      = state.page >= pages - 1;
 
   if (!state.headers.length) { wrap.innerHTML = '<div id="empty-msg">No data.</div>'; return; }
 
+  const issueRows = new Set(spellIssues.map(r => r.row));
   const colW = Math.floor(88 / state.headers.length);
   let html = `<table><thead><tr><th class="col-row-num">#</th>`;
   state.headers.forEach(h => { html += `<th style="width:${colW}%">${esc(h)}</th>`; });
@@ -324,7 +479,9 @@ function render() {
     html += `<tr data-row="${i}">`;
     html += `<td class="row-num" data-row="${i}" title="Open row editor">${i + 1}</td>`;
     r.forEach((cell, j) => {
-      html += `<td class="cell-editable" contenteditable="true" data-row="${i}" data-col="${j}" spellcheck="true">${esc(cell)}</td>`;
+      const spellCls = (hilCol !== null && j === hilCol && issueRows.has(i))
+        ? ' hil-cell-issue' : '';
+      html += `<td class="cell-editable${spellCls}" contenteditable="true" data-row="${i}" data-col="${j}" spellcheck="true">${esc(cell)}</td>`;
     });
     html += `<td class="col-actions"><button class="del-btn" title="Delete row" data-row="${i}">✕</button></td>`;
     html += `</tr>`;
@@ -333,7 +490,6 @@ function render() {
   html += `</tbody></table>`;
   wrap.innerHTML = html;
 
-  // attach events
   wrap.querySelectorAll('.cell-editable').forEach(td => {
     td.addEventListener('blur', onCellBlur);
     td.addEventListener('keydown', onCellKeydown);
@@ -404,11 +560,9 @@ $('add-row-btn').addEventListener('click', async () => {
     body: JSON.stringify({ path: state.file })
   });
   if (res.ok) {
-    const data = await res.json();
     state.rows.push(Array(state.headers.length).fill(''));
     state.page = Math.ceil(state.rows.length / state.pageSize) - 1;
     applyFilter();
-    // focus last row first cell
     setTimeout(() => {
       const cells = document.querySelectorAll('.cell-editable');
       if (cells.length) cells[cells.length - state.headers.length].focus();
@@ -434,10 +588,10 @@ function closeModal() {
 
 function renderModal() {
   const r = state.rows[modalRow];
-  $('modal-title').textContent = `Row ${modalRow + 1}`;
-  $('modal-pos').textContent = `${modalRow + 1} / ${state.rows.length}`;
-  $('modal-prev').disabled = modalRow <= 0;
-  $('modal-next').disabled = modalRow >= state.rows.length - 1;
+  $('modal-title').textContent  = `Row ${modalRow + 1}`;
+  $('modal-pos').textContent    = `${modalRow + 1} / ${state.rows.length}`;
+  $('modal-prev').disabled      = modalRow <= 0;
+  $('modal-next').disabled      = modalRow >= state.rows.length - 1;
   $('modal-status').textContent = '';
 
   const body = $('modal-body');
@@ -452,7 +606,7 @@ function renderModal() {
 
 async function saveModal() {
   const textareas = $('modal-body').querySelectorAll('textarea');
-  const pending = [];
+  const pending   = [];
   textareas.forEach(ta => {
     const col = parseInt(ta.dataset.col);
     const val = ta.value;
@@ -460,7 +614,7 @@ async function saveModal() {
   });
   if (!pending.length) { $('modal-status').textContent = 'No changes.'; return; }
 
-  $('modal-save-btn').disabled = true;
+  $('modal-save-btn').disabled  = true;
   $('modal-status').textContent = 'Saving…';
   let failed = 0;
   for (const { col, val } of pending) {
@@ -469,22 +623,18 @@ async function saveModal() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ path: state.file, row: modalRow, col, value: val })
     });
-    if (res.ok) {
-      state.rows[modalRow][col] = val;
-    } else { failed++; }
+    if (res.ok) { state.rows[modalRow][col] = val; } else { failed++; }
   }
   $('modal-save-btn').disabled = false;
   if (failed) {
     $('modal-status').textContent = `${failed} field(s) failed to save.`;
   } else {
     $('modal-status').textContent = `Saved ${pending.length} field(s).`;
-    // reflect changes in the table without full re-render
     const tr = document.querySelector(`tr[data-row="${modalRow}"]`);
     if (tr) {
       tr.classList.add('changed');
       tr.querySelectorAll('.cell-editable').forEach(td => {
-        const col = parseInt(td.dataset.col);
-        td.textContent = state.rows[modalRow][col];
+        td.textContent = state.rows[modalRow][parseInt(td.dataset.col)];
       });
     }
   }
@@ -499,8 +649,149 @@ $('modal-backdrop').addEventListener('click', e => { if (e.target === $('modal-b
 document.addEventListener('keydown', e => {
   if (!$('modal-backdrop').classList.contains('open')) return;
   if (e.key === 'Escape') closeModal();
-  if (e.key === 'ArrowLeft' && e.altKey) { $('modal-prev').click(); e.preventDefault(); }
+  if (e.key === 'ArrowLeft'  && e.altKey) { $('modal-prev').click(); e.preventDefault(); }
   if (e.key === 'ArrowRight' && e.altKey) { $('modal-next').click(); e.preventDefault(); }
+});
+
+// ── spell check ───────────────────────────────────────────────────────────────
+
+function toggleSpellSidebar() {
+  const sidebar = $('spell-sidebar');
+  const isHidden = sidebar.classList.toggle('hidden');
+  $('spell-toggle-btn').classList.toggle('active', !isHidden);
+}
+
+async function runSpellCheck() {
+  if (!state.file) { showToast('Load a file first', true); return; }
+  $('run-check-btn').disabled   = true;
+  $('spell-status').textContent = 'Checking…';
+  $('spell-issue-list').innerHTML = '';
+
+  const res = await fetch('/api/spellcheck/file', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path: state.file })
+  });
+  $('run-check-btn').disabled = false;
+
+  if (!res.ok) { showToast('Spell check failed', true); $('spell-status').textContent = 'Check failed.'; return; }
+
+  const data = await res.json();
+  hilCol      = data.hil_col;
+  spellIssues = data.issues;
+
+  if (hilCol === null) {
+    $('spell-status').textContent = 'No HIL column found in this file.';
+    $('spell-issue-list').innerHTML = '<div id="spell-empty">No HIL column detected.</div>';
+    return;
+  }
+
+  renderSpellIssues();
+  render(); // Re-render table to apply cell highlights
+}
+
+function renderSpellIssues() {
+  const list  = $('spell-issue-list');
+  const total = spellIssues.reduce((s, r) => s + r.issues.length, 0);
+
+  if (total === 0) {
+    $('spell-status').textContent = 'No issues found — HIL column looks good!';
+    list.innerHTML = '<div id="spell-empty" style="padding:24px 16px;text-align:center;color:var(--spell-fix);font-size:.85rem">All clear!</div>';
+    return;
+  }
+
+  $('spell-status').textContent = `${total} issue${total !== 1 ? 's' : ''} in ${spellIssues.length} row${spellIssues.length !== 1 ? 's' : ''}`;
+  list.innerHTML = '';
+
+  spellIssues.forEach((rowIssue, ri) => {
+    rowIssue.issues.forEach((issue, ii) => {
+      const card = document.createElement('div');
+      card.className = 'spell-card';
+      card.innerHTML = `
+        <div class="row-ref">Row ${rowIssue.row + 1} &mdash; HIL column</div>
+        <div class="issue-body">
+          <span class="word-error">${esc(issue.word)}</span>
+          <span class="arrow">&#8594;</span>
+          <span class="word-fix">${esc(issue.suggestion)}</span>
+        </div>
+        <div class="card-actions">
+          <button class="accept-btn" data-ri="${ri}" data-ii="${ii}">Accept</button>
+          <button class="reject-btn" data-ri="${ri}" data-ii="${ii}">Ignore</button>
+        </div>`;
+      list.appendChild(card);
+    });
+  });
+
+  list.querySelectorAll('.accept-btn').forEach(btn => btn.addEventListener('click', onAcceptIssue));
+  list.querySelectorAll('.reject-btn').forEach(btn => btn.addEventListener('click', onRejectIssue));
+}
+
+function escapeRegex(str) {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+async function onAcceptIssue(e) {
+  const ri       = parseInt(e.target.dataset.ri);
+  const ii       = parseInt(e.target.dataset.ii);
+  const rowIssue = spellIssues[ri];
+  const issue    = rowIssue.issues[ii];
+
+  const currentVal = state.rows[rowIssue.row][rowIssue.col];
+  // Replace all occurrences of the Tagalog word (word-boundary aware)
+  const newVal = currentVal.replace(
+    new RegExp('\\b' + escapeRegex(issue.word) + '\\b', 'g'),
+    issue.suggestion
+  );
+
+  if (newVal === currentVal) {
+    // Word already changed; just dismiss
+    removeIssue(ri, ii);
+    return;
+  }
+
+  const res = await fetch('/api/tsv/cell', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path: state.file, row: rowIssue.row, col: rowIssue.col, value: newVal })
+  });
+
+  if (res.ok) {
+    state.rows[rowIssue.row][rowIssue.col] = newVal;
+    // Update visible cell if on current page
+    const td = document.querySelector(
+      `td.cell-editable[data-row="${rowIssue.row}"][data-col="${rowIssue.col}"]`
+    );
+    if (td) td.textContent = newVal;
+    removeIssue(ri, ii);
+    showToast('Applied');
+  } else {
+    showToast('Save failed', true);
+  }
+}
+
+function onRejectIssue(e) {
+  removeIssue(parseInt(e.target.dataset.ri), parseInt(e.target.dataset.ii));
+}
+
+function removeIssue(ri, ii) {
+  const rowIssue = spellIssues[ri];
+  rowIssue.issues.splice(ii, 1);
+  if (rowIssue.issues.length === 0) {
+    // Remove cell highlight
+    const td = document.querySelector(
+      `td.cell-editable[data-row="${rowIssue.row}"][data-col="${rowIssue.col}"]`
+    );
+    if (td) td.classList.remove('hil-cell-issue');
+    spellIssues.splice(ri, 1);
+  }
+  renderSpellIssues();
+}
+
+$('spell-toggle-btn').addEventListener('click', toggleSpellSidebar);
+$('run-check-btn').addEventListener('click', runSpellCheck);
+$('spell-close-btn').addEventListener('click', () => {
+  $('spell-sidebar').classList.add('hidden');
+  $('spell-toggle-btn').classList.remove('active');
 });
 
 // ── controls ─────────────────────────────────────────────────────────────────
@@ -514,7 +805,7 @@ $('page-size').addEventListener('change', e => { state.pageSize = parseInt(e.tar
 let toastTimer;
 function showToast(msg, err = false) {
   const t = $('toast');
-  t.textContent = msg;
+  t.textContent      = msg;
   t.style.background = err ? '#742a2a' : '#2d3748';
   t.classList.add('show');
   clearTimeout(toastTimer);
@@ -530,4 +821,5 @@ loadFiles();
 
 if __name__ == "__main__":
     print("TSV Editor running at http://localhost:5000")
+    print(f"Loaded {len(TAGALOG_MAP)} Tagalog→Hiligaynon mappings for spell check.")
     app.run(debug=True, port=5000)
