@@ -1,5 +1,31 @@
 # Getting started
 
+### TSV Editor (web UI)
+A browser-based editor for viewing and fixing spelling/grammar in parallel TSV datasets.
+
+**Start the server:**
+```bash
+python tsv_editor.py
+```
+Then open **http://localhost:5000** in your browser.
+
+**What you can do:**
+- Select any `.tsv` file in the project from the dropdown (auto-discovered, grouped by folder)
+- Click any cell to edit it — changes save to disk immediately on blur
+- Press `Enter` to commit an edit, `Escape` to cancel
+- Search across all columns with the search box
+- Navigate large files with pagination (50 / 100 / 200 / 500 rows per page)
+- Add a blank row with **+ Row**
+- Delete a row with the **✕** button (asks for confirmation)
+- Edited rows are highlighted with a purple left border so you can track what changed
+
+**Install dependency** (Flask, usually already present):
+```bash
+pip install flask
+```
+
+---
+
 ### Convert your csv to tsv
 ```
 CSV to TSV Converter CLI
