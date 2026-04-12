@@ -13,7 +13,16 @@ from flask import Flask, jsonify, render_template_string, request
 
 BASE_DIR  = Path(__file__).parent
 SPELL_DIR = BASE_DIR / "spell-checker"
+
+# Load .env if present (optional dep — silently skipped if not installed)
+try:
+    from dotenv import load_dotenv
+    load_dotenv(BASE_DIR / ".env")
+except ImportError:
+    pass
+
 app = Flask(__name__)
+app.secret_key = os.environ.get("SECRET_KEY", os.urandom(24))
 
 # ── Supabase / database ───────────────────────────────────────────────────────
 _sb_instance = None
@@ -3456,6 +3465,9 @@ loadFiles();
 """
 
 if __name__ == "__main__":
-    print("TSV Editor running at http://localhost:5000")
+    host  = os.environ.get("HOST", "127.0.0.1")
+    port  = int(os.environ.get("PORT", 5000))
+    debug = os.environ.get("DEBUG", "true").lower() in ("1", "true", "yes")
+    print(f"TSV Editor running at http://{host}:{port}")
     print(f"Loaded {len(DIALECT_MAP)} Hiligaynon→Ilonggo dialect mappings.")
-    app.run(debug=True, port=5000)
+    app.run(debug=debug, host=host, port=port)
