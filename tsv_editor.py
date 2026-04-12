@@ -145,10 +145,10 @@ def en_grammar_check(text: str) -> list[dict]:
     for m in tool.check(text):
         issues.append({
             "start":        m.offset,
-            "end":          m.offset + m.errorLength,
+            "end":          m.offset + m.error_length,
             "message":      m.message,
             "replacements": list(m.replacements)[:3],
-            "rule_id":      m.ruleId,
+            "rule_id":      m.rule_id,
             "category":     m.category,
         })
     return issues
