@@ -118,6 +118,29 @@ def build_dialect_map() -> tuple[dict[str, str], set[str]]:
 # Load once at startup
 DIALECT_MAP, ILONGGO_VOCAB = build_dialect_map()
 
+# ── custom user dictionary ────────────────────────────────────────────────────
+CUSTOM_DICT_FILE = SPELL_DIR / "custom_words.csv"
+
+
+def load_custom_dict() -> set[str]:
+    """Load user-added words that should not be flagged (normalized, no diacritics)."""
+    if not CUSTOM_DICT_FILE.exists():
+        return set()
+    with open(CUSTOM_DICT_FILE, encoding="utf-8", newline="") as f:
+        return {strip_diacritics(row["word"].strip())
+                for row in csv.DictReader(f) if row.get("word", "").strip()}
+
+
+def save_custom_dict(words: set[str]) -> None:
+    with open(CUSTOM_DICT_FILE, "w", encoding="utf-8", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["word"])
+        w.writeheader()
+        for word in sorted(words):
+            w.writerow({"word": word})
+
+
+CUSTOM_DICT: set[str] = load_custom_dict()
+
 
 # ── English grammar (LanguageTool) ───────────────────────────────────────────
 try:
@@ -263,6 +286,8 @@ def spellcheck_text(text: str) -> list[dict]:
         if word.isdigit() or len(word) < 2 or word[0].isupper():
             continue
         norm = strip_diacritics(word)
+        if norm in CUSTOM_DICT:
+            continue
         if norm in DIALECT_MAP:
             issues.append({
                 "word":       word,
@@ -446,6 +471,31 @@ def api_en_grammar_batch():
         if issues:
             results.append({"row": item["row"], "issues": issues})
     return jsonify({"issues": results})
+
+
+@app.get("/api/dictionary")
+def api_get_dictionary():
+    return jsonify({"words": sorted(CUSTOM_DICT)})
+
+
+@app.post("/api/dictionary/add")
+def api_add_word():
+    word = (request.json or {}).get("word", "").strip()
+    if not word:
+        return jsonify({"error": "No word provided"}), 400
+    norm = strip_diacritics(word.lower())
+    CUSTOM_DICT.add(norm)
+    save_custom_dict(CUSTOM_DICT)
+    return jsonify({"ok": True, "word": norm, "total": len(CUSTOM_DICT)})
+
+
+@app.post("/api/dictionary/remove")
+def api_remove_word():
+    word = (request.json or {}).get("word", "").strip()
+    norm = strip_diacritics(word.lower())
+    CUSTOM_DICT.discard(norm)
+    save_custom_dict(CUSTOM_DICT)
+    return jsonify({"ok": True, "total": len(CUSTOM_DICT)})
 
 
 @app.post("/api/clean")
@@ -790,6 +840,32 @@ td.cell-glow { animation: cell-glow .9s ease; }
 td.find-match { background: rgba(246,173,85,.25) !important; outline: 1px solid #f6ad55; }
 td.find-match-active { background: rgba(108,99,255,.35) !important; outline: 2px solid var(--accent); }
 
+/* ── settings modal ── */
+#settings-backdrop { display:none; position:fixed; inset:0; background:rgba(0,0,0,.6); backdrop-filter:blur(3px); z-index:400; align-items:flex-start; justify-content:center; padding-top:5vh; }
+#settings-backdrop.open { display:flex; }
+#settings-modal { background:var(--surface); border:1px solid var(--border); border-radius:12px; width:min(640px,95vw); max-height:88vh; display:flex; flex-direction:column; box-shadow:0 24px 64px rgba(0,0,0,.6); }
+#settings-header { display:flex; align-items:center; gap:10px; padding:14px 18px; border-bottom:1px solid var(--border); flex-shrink:0; }
+#settings-header h2 { font-size:1rem; font-weight:600; color:var(--accent); flex:1; }
+#settings-close { background:transparent; border:none; color:var(--muted); font-size:1.3rem; cursor:pointer; line-height:1; padding:2px 6px; border-radius:4px; }
+#settings-close:hover { color:var(--text); }
+#settings-body { overflow-y:auto; padding:18px; flex:1; display:flex; flex-direction:column; gap:20px; }
+.settings-section h3 { font-size:0.78rem; font-weight:700; text-transform:uppercase; letter-spacing:.07em; color:var(--muted); margin-bottom:10px; }
+.settings-section p { font-size:0.82rem; color:var(--muted); margin-bottom:10px; line-height:1.5; }
+#dict-add-row { display:flex; gap:8px; margin-bottom:12px; }
+#dict-add-input { flex:1; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:6px; padding:6px 10px; font-size:0.88rem; }
+#dict-add-input:focus { outline:none; border-color:var(--accent); }
+#dict-add-btn { padding:6px 14px; border-radius:6px; border:none; cursor:pointer; font-size:0.85rem; font-weight:500; background:var(--accent); color:#fff; white-space:nowrap; }
+#dict-add-btn:hover { opacity:.85; }
+#dict-list { display:flex; flex-direction:column; gap:4px; max-height:340px; overflow-y:auto; }
+.dict-item { display:flex; align-items:center; gap:8px; padding:6px 10px; background:var(--bg); border:1px solid var(--border); border-radius:6px; font-size:0.88rem; }
+.dict-item span { flex:1; font-family:monospace; color:var(--text); }
+.dict-item button { background:transparent; border:none; color:var(--muted); cursor:pointer; font-size:1rem; line-height:1; padding:1px 5px; border-radius:3px; }
+.dict-item button:hover { color:var(--danger); background:rgba(252,129,129,.1); }
+#dict-empty { padding:16px; text-align:center; color:var(--muted); font-size:0.82rem; }
+#dict-stats { font-size:0.75rem; color:var(--muted); margin-top:6px; }
+.btn-dict { flex:1; padding:4px 8px; border-radius:5px; border:1px solid rgba(99,179,237,.4); cursor:pointer; font-size:0.72rem; font-weight:500; background:rgba(99,179,237,.1); color:#63b3ed; transition:background .15s; white-space:nowrap; }
+.btn-dict:hover { background:rgba(99,179,237,.25); }
+
 /* ── toast ── */
 .toast { position: fixed; bottom: 20px; right: 20px; background: #2d3748; color: #fff; padding: 10px 18px; border-radius: 8px; font-size: 0.85rem; opacity: 0; transition: opacity .25s; pointer-events: none; z-index: 100; }
 .toast.show { opacity: 1; }
@@ -805,6 +881,7 @@ td.find-match-active { background: rgba(108,99,255,.35) !important; outline: 2px
   <button class="btn btn-primary" id="add-row-btn" disabled>+ Row</button>
   <button class="btn btn-spell" id="spell-toggle-btn">Spell Check</button>
   <span id="save-indicator" class="saved">● Saved</span>
+  <button class="btn" id="settings-btn" style="background:var(--border);color:var(--muted)" title="Settings / Dictionary">⚙ Settings</button>
 </header>
 
 <div id="find-panel">
@@ -881,6 +958,36 @@ td.find-match-active { background: rgba(108,99,255,.35) !important; outline: 2px
 </div>
 
 <div class="toast" id="toast"></div>
+
+<div id="settings-backdrop">
+  <div id="settings-modal">
+    <div id="settings-header">
+      <h2>⚙ Settings</h2>
+      <button id="settings-close" title="Close">✕</button>
+    </div>
+    <div id="settings-body">
+
+      <div class="settings-section">
+        <h3>Custom Dictionary</h3>
+        <p>Words added here are treated as valid and won't be flagged by the HIL spell checker. Useful for slang, proper nouns, or domain-specific terms.</p>
+        <div id="dict-add-row">
+          <input id="dict-add-input" type="text" placeholder="Add word to dictionary…" autocomplete="off">
+          <button id="dict-add-btn">Add</button>
+        </div>
+        <div id="dict-list">
+          <div id="dict-empty">No custom words yet.</div>
+        </div>
+        <div id="dict-stats"></div>
+      </div>
+
+      <div class="settings-section">
+        <h3>Dialect Map</h3>
+        <p id="dialect-stats" style="font-size:0.82rem;color:var(--muted)">Loading…</p>
+      </div>
+
+    </div>
+  </div>
+</div>
 
 <div id="modal-backdrop">
   <div id="modal">
@@ -1521,6 +1628,7 @@ function renderSpellIssues() {
         <div class="card-actions">
           <button class="accept-btn" data-ri="${ri}" data-ii="${ii}">Accept</button>
           <button class="reject-btn" data-ri="${ri}" data-ii="${ii}">Ignore</button>
+          <button class="btn-dict" data-word="${esc(issue.word)}" data-ri="${ri}" data-ii="${ii}" title="Mark as valid — won't be flagged again">+ Dict</button>
         </div>`;
       list.appendChild(card);
     });
@@ -1531,6 +1639,7 @@ function renderSpellIssues() {
   }));
   list.querySelectorAll('.accept-btn').forEach(btn => btn.addEventListener('click', onAcceptIssue));
   list.querySelectorAll('.reject-btn').forEach(btn => btn.addEventListener('click', onRejectIssue));
+  list.querySelectorAll('.btn-dict').forEach(btn => btn.addEventListener('click', onAddToDict));
 }
 
 // ── grammar rendering ─────────────────────────────────────────────────────────
@@ -2178,6 +2287,103 @@ document.addEventListener('keydown', e => {
   if ((e.ctrlKey || e.metaKey) && e.key === 'f') { e.preventDefault(); openFindPanel(false); }
   if ((e.ctrlKey || e.metaKey) && e.key === 'h') { e.preventDefault(); openFindPanel(true); }
   if (e.key === 'Escape' && $('find-panel').classList.contains('open')) closeFindPanel();
+});
+
+// ── settings / dictionary ─────────────────────────────────────────────────────
+let dictWords = [];  // sorted list of normalized custom words
+
+async function openSettings() {
+  $('settings-backdrop').classList.add('open');
+  await loadDictionary();
+  // Show dialect map stats
+  $('dialect-stats').textContent =
+    `${Object.keys ? Object.entries(window._dialectMap || {}).length : '…'} dialect mappings loaded from words.csv / verbs.csv. ` +
+    `Edit the CSV files in spell-checker/ to add or remove mappings.`;
+  setTimeout(() => $('dict-add-input').focus(), 60);
+}
+
+function closeSettings() { $('settings-backdrop').classList.remove('open'); }
+
+async function loadDictionary() {
+  const res = await fetch('/api/dictionary');
+  if (!res.ok) return;
+  const data = await res.json();
+  dictWords = data.words;
+  renderDictionary();
+}
+
+function renderDictionary() {
+  const list = $('dict-list');
+  $('dict-stats').textContent = `${dictWords.length} word${dictWords.length !== 1 ? 's' : ''} in custom dictionary`;
+  if (!dictWords.length) {
+    list.innerHTML = '<div id="dict-empty">No custom words yet.</div>';
+    return;
+  }
+  list.innerHTML = '';
+  dictWords.forEach(word => {
+    const item = document.createElement('div');
+    item.className = 'dict-item';
+    item.innerHTML = `<span>${esc(word)}</span><button data-word="${esc(word)}" title="Remove">✕</button>`;
+    item.querySelector('button').addEventListener('click', () => removeDictWord(word));
+    list.appendChild(item);
+  });
+}
+
+async function addDictWord(word) {
+  word = word.trim().toLowerCase();
+  if (!word) return;
+  const res = await fetch('/api/dictionary/add', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ word })
+  });
+  if (!res.ok) { showToast('Failed to add word', true); return; }
+  const data = await res.json();
+  if (!dictWords.includes(data.word)) {
+    dictWords = [...dictWords, data.word].sort();
+  }
+  renderDictionary();
+  showToast(`"${data.word}" added to dictionary`);
+}
+
+async function removeDictWord(word) {
+  const res = await fetch('/api/dictionary/remove', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ word })
+  });
+  if (!res.ok) { showToast('Failed to remove word', true); return; }
+  dictWords = dictWords.filter(w => w !== word);
+  renderDictionary();
+  showToast(`"${word}" removed`);
+}
+
+async function onAddToDict(e) {
+  const word = e.target.dataset.word;
+  const ri   = parseInt(e.target.dataset.ri);
+  const ii   = parseInt(e.target.dataset.ii);
+  await addDictWord(word);
+  // Dismiss the issue from the sidebar (same as ignore)
+  removeIssue(ri, ii);
+  // Remove from visible cell highlights
+  applyAllHighlights();
+}
+
+$('settings-btn').addEventListener('click', openSettings);
+$('settings-close').addEventListener('click', closeSettings);
+$('settings-backdrop').addEventListener('click', e => { if (e.target === $('settings-backdrop')) closeSettings(); });
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && $('settings-backdrop').classList.contains('open')) closeSettings();
+});
+
+$('dict-add-btn').addEventListener('click', () => {
+  const val = $('dict-add-input').value;
+  if (!val.trim()) return;
+  addDictWord(val);
+  $('dict-add-input').value = '';
+});
+$('dict-add-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter') { $('dict-add-btn').click(); }
 });
 
 // ── controls ─────────────────────────────────────────────────────────────────
