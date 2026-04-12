@@ -473,6 +473,71 @@ def api_en_grammar_batch():
     return jsonify({"issues": results})
 
 
+@app.get("/api/dialect")
+def api_get_dialect():
+    """Return all dialect map entries as [{base, target, source}]."""
+    entries = []
+    for fname in ("words.csv", "verbs.csv"):
+        fp = SPELL_DIR / fname
+        if not fp.exists():
+            continue
+        with open(fp, encoding="utf-8", newline="") as f:
+            for row in csv.DictReader(f):
+                base   = row.get("base_word", "").strip()
+                target = row.get("target_word", "").strip()
+                if base and target:
+                    entries.append({"base": base, "target": target, "source": fname})
+    entries.sort(key=lambda e: e["base"].lower())
+    return jsonify({"entries": entries, "total": len(entries)})
+
+
+@app.post("/api/dialect/add")
+def api_add_dialect():
+    """Add a base→target mapping to words.csv and reload DIALECT_MAP."""
+    body   = request.json or {}
+    base   = body.get("base", "").strip()
+    target = body.get("target", "").strip()
+    if not base or not target:
+        return jsonify({"error": "base and target required"}), 400
+
+    fp = SPELL_DIR / "words.csv"
+    write_header = not fp.exists()
+    with open(fp, "a", encoding="utf-8", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["base_word", "target_word"])
+        if write_header:
+            w.writeheader()
+        w.writerow({"base_word": base, "target_word": target})
+
+    global DIALECT_MAP, ILONGGO_VOCAB
+    DIALECT_MAP, ILONGGO_VOCAB = build_dialect_map()
+    return jsonify({"ok": True, "total": len(DIALECT_MAP)})
+
+
+@app.post("/api/dialect/remove")
+def api_remove_dialect():
+    """Remove all rows where base_word matches from words.csv and verbs.csv, reload map."""
+    base = strip_diacritics((request.json or {}).get("base", "").strip().lower())
+    if not base:
+        return jsonify({"error": "base required"}), 400
+
+    for fname in ("words.csv", "verbs.csv"):
+        fp = SPELL_DIR / fname
+        if not fp.exists():
+            continue
+        with open(fp, encoding="utf-8", newline="") as f:
+            rows = list(csv.DictReader(f))
+        kept = [r for r in rows if strip_diacritics(r.get("base_word", "").strip().lower()) != base]
+        if len(kept) != len(rows):
+            with open(fp, "w", encoding="utf-8", newline="") as f:
+                w = csv.DictWriter(f, fieldnames=["base_word", "target_word"])
+                w.writeheader()
+                w.writerows(kept)
+
+    global DIALECT_MAP, ILONGGO_VOCAB
+    DIALECT_MAP, ILONGGO_VOCAB = build_dialect_map()
+    return jsonify({"ok": True, "total": len(DIALECT_MAP)})
+
+
 @app.get("/api/dictionary")
 def api_get_dictionary():
     return jsonify({"words": sorted(CUSTOM_DICT)})
@@ -848,8 +913,14 @@ td.find-match-active { background: rgba(108,99,255,.35) !important; outline: 2px
 #settings-header h2 { font-size:1rem; font-weight:600; color:var(--accent); flex:1; }
 #settings-close { background:transparent; border:none; color:var(--muted); font-size:1.3rem; cursor:pointer; line-height:1; padding:2px 6px; border-radius:4px; }
 #settings-close:hover { color:var(--text); }
-#settings-body { overflow-y:auto; padding:18px; flex:1; display:flex; flex-direction:column; gap:20px; }
-.settings-section h3 { font-size:0.78rem; font-weight:700; text-transform:uppercase; letter-spacing:.07em; color:var(--muted); margin-bottom:10px; }
+#settings-tabs { display:flex; gap:2px; padding:0 18px; border-bottom:1px solid var(--border); flex-shrink:0; }
+.settings-tab { padding:9px 16px; font-size:0.85rem; font-weight:500; color:var(--muted); cursor:pointer; border:none; background:transparent; border-bottom:2px solid transparent; margin-bottom:-1px; transition:color .15s, border-color .15s; }
+.settings-tab:hover { color:var(--text); }
+.settings-tab.active { color:var(--accent); border-bottom-color:var(--accent); }
+#settings-body { overflow-y:auto; padding:18px; flex:1; display:flex; flex-direction:column; gap:16px; }
+.settings-panel { display:none; flex-direction:column; gap:14px; }
+.settings-panel.active { display:flex; }
+.settings-section h3 { font-size:0.78rem; font-weight:700; text-transform:uppercase; letter-spacing:.07em; color:var(--muted); margin-bottom:8px; }
 .settings-section p { font-size:0.82rem; color:var(--muted); margin-bottom:10px; line-height:1.5; }
 #dict-add-row { display:flex; gap:8px; margin-bottom:12px; }
 #dict-add-input { flex:1; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:6px; padding:6px 10px; font-size:0.88rem; }
@@ -865,6 +936,22 @@ td.find-match-active { background: rgba(108,99,255,.35) !important; outline: 2px
 #dict-stats { font-size:0.75rem; color:var(--muted); margin-top:6px; }
 .btn-dict { flex:1; padding:4px 8px; border-radius:5px; border:1px solid rgba(99,179,237,.4); cursor:pointer; font-size:0.72rem; font-weight:500; background:rgba(99,179,237,.1); color:#63b3ed; transition:background .15s; white-space:nowrap; }
 .btn-dict:hover { background:rgba(99,179,237,.25); }
+#dialect-filter { width:100%; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:6px; padding:6px 10px; font-size:0.85rem; margin-bottom:10px; }
+#dialect-filter:focus { outline:none; border-color:var(--accent); }
+#dialect-add-grid { display:grid; grid-template-columns:1fr 1fr auto; gap:6px; margin-bottom:10px; }
+#dialect-add-grid input { background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:6px; padding:6px 10px; font-size:0.85rem; }
+#dialect-add-grid input:focus { outline:none; border-color:var(--accent); }
+#dialect-add-grid button { padding:6px 14px; border-radius:6px; border:none; cursor:pointer; font-size:0.85rem; font-weight:500; background:var(--accent); color:#fff; white-space:nowrap; }
+#dialect-add-grid button:hover { opacity:.85; }
+#dialect-list { display:flex; flex-direction:column; gap:3px; max-height:340px; overflow-y:auto; }
+.dialect-item { display:grid; grid-template-columns:1fr 1fr auto auto; align-items:center; gap:6px; padding:5px 10px; background:var(--bg); border:1px solid var(--border); border-radius:6px; font-size:0.83rem; }
+.dialect-item .di-base { font-family:monospace; color:var(--danger); }
+.dialect-item .di-arr  { color:var(--muted); text-align:center; }
+.dialect-item .di-tgt  { font-family:monospace; color:var(--spell-fix); }
+.dialect-item .di-src  { font-size:0.68rem; color:var(--muted); text-align:right; white-space:nowrap; }
+.dialect-item button   { background:transparent; border:none; color:var(--muted); cursor:pointer; font-size:0.95rem; padding:1px 5px; border-radius:3px; }
+.dialect-item button:hover { color:var(--danger); background:rgba(252,129,129,.1); }
+#dialect-stats-line { font-size:0.75rem; color:var(--muted); margin-top:4px; }
 
 /* ── toast ── */
 .toast { position: fixed; bottom: 20px; right: 20px; background: #2d3748; color: #fff; padding: 10px 18px; border-radius: 8px; font-size: 0.85rem; opacity: 0; transition: opacity .25s; pointer-events: none; z-index: 100; }
@@ -965,24 +1052,34 @@ td.find-match-active { background: rgba(108,99,255,.35) !important; outline: 2px
       <h2>⚙ Settings</h2>
       <button id="settings-close" title="Close">✕</button>
     </div>
+    <div id="settings-tabs">
+      <button class="settings-tab active" data-tab="dict">Custom Dictionary</button>
+      <button class="settings-tab" data-tab="dialect">Dialect Map</button>
+    </div>
     <div id="settings-body">
 
-      <div class="settings-section">
-        <h3>Custom Dictionary</h3>
-        <p>Words added here are treated as valid and won't be flagged by the HIL spell checker. Useful for slang, proper nouns, or domain-specific terms.</p>
+      <!-- Custom Dictionary panel -->
+      <div class="settings-panel active" id="panel-dict">
+        <p style="font-size:.82rem;color:var(--muted)">Words added here are treated as valid and won't be flagged by the HIL spell checker. Useful for slang, proper nouns, or domain-specific terms.</p>
         <div id="dict-add-row">
           <input id="dict-add-input" type="text" placeholder="Add word to dictionary…" autocomplete="off">
           <button id="dict-add-btn">Add</button>
         </div>
-        <div id="dict-list">
-          <div id="dict-empty">No custom words yet.</div>
-        </div>
+        <div id="dict-list"><div id="dict-empty">No custom words yet.</div></div>
         <div id="dict-stats"></div>
       </div>
 
-      <div class="settings-section">
-        <h3>Dialect Map</h3>
-        <p id="dialect-stats" style="font-size:0.82rem;color:var(--muted)">Loading…</p>
+      <!-- Dialect Map panel -->
+      <div class="settings-panel" id="panel-dialect">
+        <p style="font-size:.82rem;color:var(--muted)">Manage word-level HIL→Ilonggo replacements. Entries are stored in <code style="font-size:.8rem;background:var(--bg);padding:1px 5px;border-radius:3px">spell-checker/words.csv</code>. Changes take effect immediately.</p>
+        <div id="dialect-add-grid">
+          <input id="dialect-base-input"   type="text" placeholder="Non-standard word…" autocomplete="off">
+          <input id="dialect-target-input" type="text" placeholder="Ilonggo form…"      autocomplete="off">
+          <button id="dialect-add-btn">Add</button>
+        </div>
+        <input id="dialect-filter" type="search" placeholder="Filter entries…" autocomplete="off">
+        <div id="dialect-list"><div style="padding:12px;text-align:center;color:var(--muted);font-size:.82rem">Loading…</div></div>
+        <div id="dialect-stats-line"></div>
       </div>
 
     </div>
@@ -2290,40 +2387,51 @@ document.addEventListener('keydown', e => {
 });
 
 // ── settings / dictionary ─────────────────────────────────────────────────────
-let dictWords = [];  // sorted list of normalized custom words
+let dictWords    = [];   // sorted custom-dict words
+let dialectAll   = [];   // all dialect entries [{base, target, source}]
+let dialectQuery = '';
+
+// ── tab switching ─────────────────────────────────────────────────────────────
+document.querySelectorAll('.settings-tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.settings-tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.settings-panel').forEach(p => p.classList.remove('active'));
+    tab.classList.add('active');
+    $('panel-' + tab.dataset.tab).classList.add('active');
+    if (tab.dataset.tab === 'dialect' && !dialectAll.length) loadDialect();
+  });
+});
 
 async function openSettings() {
   $('settings-backdrop').classList.add('open');
+  // Always start on the dict tab
+  document.querySelectorAll('.settings-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === 'dict'));
+  document.querySelectorAll('.settings-panel').forEach(p => p.classList.toggle('active', p.id === 'panel-dict'));
+  dialectAll   = [];
+  dialectQuery = '';
   await loadDictionary();
-  // Show dialect map stats
-  $('dialect-stats').textContent =
-    `${Object.keys ? Object.entries(window._dialectMap || {}).length : '…'} dialect mappings loaded from words.csv / verbs.csv. ` +
-    `Edit the CSV files in spell-checker/ to add or remove mappings.`;
   setTimeout(() => $('dict-add-input').focus(), 60);
 }
 
 function closeSettings() { $('settings-backdrop').classList.remove('open'); }
 
+// ── custom dictionary ─────────────────────────────────────────────────────────
 async function loadDictionary() {
   const res = await fetch('/api/dictionary');
   if (!res.ok) return;
-  const data = await res.json();
-  dictWords = data.words;
+  dictWords = (await res.json()).words;
   renderDictionary();
 }
 
 function renderDictionary() {
   const list = $('dict-list');
   $('dict-stats').textContent = `${dictWords.length} word${dictWords.length !== 1 ? 's' : ''} in custom dictionary`;
-  if (!dictWords.length) {
-    list.innerHTML = '<div id="dict-empty">No custom words yet.</div>';
-    return;
-  }
+  if (!dictWords.length) { list.innerHTML = '<div id="dict-empty">No custom words yet.</div>'; return; }
   list.innerHTML = '';
   dictWords.forEach(word => {
     const item = document.createElement('div');
     item.className = 'dict-item';
-    item.innerHTML = `<span>${esc(word)}</span><button data-word="${esc(word)}" title="Remove">✕</button>`;
+    item.innerHTML = `<span>${esc(word)}</span><button title="Remove">✕</button>`;
     item.querySelector('button').addEventListener('click', () => removeDictWord(word));
     list.appendChild(item);
   });
@@ -2333,23 +2441,19 @@ async function addDictWord(word) {
   word = word.trim().toLowerCase();
   if (!word) return;
   const res = await fetch('/api/dictionary/add', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ word })
   });
   if (!res.ok) { showToast('Failed to add word', true); return; }
   const data = await res.json();
-  if (!dictWords.includes(data.word)) {
-    dictWords = [...dictWords, data.word].sort();
-  }
+  if (!dictWords.includes(data.word)) dictWords = [...dictWords, data.word].sort();
   renderDictionary();
   showToast(`"${data.word}" added to dictionary`);
 }
 
 async function removeDictWord(word) {
   const res = await fetch('/api/dictionary/remove', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ word })
   });
   if (!res.ok) { showToast('Failed to remove word', true); return; }
@@ -2363,18 +2467,9 @@ async function onAddToDict(e) {
   const ri   = parseInt(e.target.dataset.ri);
   const ii   = parseInt(e.target.dataset.ii);
   await addDictWord(word);
-  // Dismiss the issue from the sidebar (same as ignore)
   removeIssue(ri, ii);
-  // Remove from visible cell highlights
   applyAllHighlights();
 }
-
-$('settings-btn').addEventListener('click', openSettings);
-$('settings-close').addEventListener('click', closeSettings);
-$('settings-backdrop').addEventListener('click', e => { if (e.target === $('settings-backdrop')) closeSettings(); });
-document.addEventListener('keydown', e => {
-  if (e.key === 'Escape' && $('settings-backdrop').classList.contains('open')) closeSettings();
-});
 
 $('dict-add-btn').addEventListener('click', () => {
   const val = $('dict-add-input').value;
@@ -2382,8 +2477,89 @@ $('dict-add-btn').addEventListener('click', () => {
   addDictWord(val);
   $('dict-add-input').value = '';
 });
-$('dict-add-input').addEventListener('keydown', e => {
-  if (e.key === 'Enter') { $('dict-add-btn').click(); }
+$('dict-add-input').addEventListener('keydown', e => { if (e.key === 'Enter') $('dict-add-btn').click(); });
+
+// ── dialect map management ────────────────────────────────────────────────────
+async function loadDialect() {
+  $('dialect-list').innerHTML = '<div style="padding:12px;text-align:center;color:var(--muted);font-size:.82rem">Loading…</div>';
+  const res = await fetch('/api/dialect');
+  if (!res.ok) { $('dialect-list').innerHTML = '<div style="padding:12px;color:var(--danger);font-size:.82rem">Load failed</div>'; return; }
+  const data = await res.json();
+  dialectAll = data.entries;
+  renderDialect();
+}
+
+function renderDialect() {
+  const q    = dialectQuery.toLowerCase();
+  const list = $('dialect-list');
+  const vis  = q ? dialectAll.filter(e => e.base.toLowerCase().includes(q) || e.target.toLowerCase().includes(q)) : dialectAll;
+
+  $('dialect-stats-line').textContent =
+    `${vis.length} of ${dialectAll.length} entries shown`;
+
+  if (!vis.length) {
+    list.innerHTML = `<div style="padding:14px;text-align:center;color:var(--muted);font-size:.82rem">${q ? 'No matches.' : 'No entries yet.'}</div>`;
+    return;
+  }
+  list.innerHTML = '';
+  vis.forEach(entry => {
+    const item = document.createElement('div');
+    item.className = 'dialect-item';
+    item.innerHTML = `
+      <span class="di-base">${esc(entry.base)}</span>
+      <span class="di-arr">→</span>
+      <span class="di-tgt">${esc(entry.target)}</span>
+      <span class="di-src">${esc(entry.source)}</span>
+      <button data-base="${esc(entry.base)}" title="Remove mapping">✕</button>`;
+    item.querySelector('button').addEventListener('click', () => removeDialectEntry(entry.base));
+    list.appendChild(item);
+  });
+}
+
+async function addDialectEntry() {
+  const base   = $('dialect-base-input').value.trim();
+  const target = $('dialect-target-input').value.trim();
+  if (!base || !target) { showToast('Fill in both fields', true); return; }
+  const res = await fetch('/api/dialect/add', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ base, target })
+  });
+  if (!res.ok) { showToast('Failed to add entry', true); return; }
+  $('dialect-base-input').value = '';
+  $('dialect-target-input').value = '';
+  $('dialect-base-input').focus();
+  // Reload full list to reflect the server rebuild
+  await loadDialect();
+  showToast(`"${base}" → "${target}" added`);
+}
+
+async function removeDialectEntry(base) {
+  if (!confirm(`Remove mapping for "${base}"?`)) return;
+  const res = await fetch('/api/dialect/remove', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ base })
+  });
+  if (!res.ok) { showToast('Remove failed', true); return; }
+  dialectAll = dialectAll.filter(e => e.base.toLowerCase() !== base.toLowerCase());
+  renderDialect();
+  showToast(`"${base}" removed`);
+}
+
+$('dialect-add-btn').addEventListener('click', addDialectEntry);
+[$('dialect-base-input'), $('dialect-target-input')].forEach(inp =>
+  inp.addEventListener('keydown', e => { if (e.key === 'Enter') addDialectEntry(); })
+);
+$('dialect-filter').addEventListener('input', e => {
+  dialectQuery = e.target.value;
+  renderDialect();
+});
+
+// ── settings open/close ───────────────────────────────────────────────────────
+$('settings-btn').addEventListener('click', openSettings);
+$('settings-close').addEventListener('click', closeSettings);
+$('settings-backdrop').addEventListener('click', e => { if (e.target === $('settings-backdrop')) closeSettings(); });
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && $('settings-backdrop').classList.contains('open')) closeSettings();
 });
 
 // ── controls ─────────────────────────────────────────────────────────────────
