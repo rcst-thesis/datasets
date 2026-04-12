@@ -55,6 +55,25 @@ def _init_db() -> bool:
 
 _init_db()
 
+def _settings_get(key: str):
+    """Fetch a JSON value from app_settings. Returns None if unavailable."""
+    if not DB_OK:
+        return None
+    try:
+        res = sb().table("app_settings").select("value").eq("key", key).single().execute()
+        return res.data.get("value")
+    except Exception:
+        return None
+
+def _settings_set(key: str, value) -> None:
+    """Upsert a JSON value into app_settings. Silent no-op if DB unavailable."""
+    if not DB_OK:
+        return
+    try:
+        sb().table("app_settings").upsert({"key": key, "value": value}).execute()
+    except Exception as e:
+        print(f"[warn] settings_set({key}) failed: {e}")
+
 def sb():
     if not DB_OK:
         raise RuntimeError("Database not configured. Set SUPABASE_URL and SUPABASE_KEY, then restart.")
@@ -174,15 +193,21 @@ CUSTOM_DICT_FILE = SPELL_DIR / "custom_words.csv"
 
 
 def load_custom_dict() -> set[str]:
-    """Load user-added words that should not be flagged (normalized, no diacritics)."""
+    # Try Supabase first (shared across all annotators)
+    remote = _settings_get("custom_dict")
+    if remote is not None and isinstance(remote, list):
+        return set(remote)
+    # Fall back to local CSV
     if not CUSTOM_DICT_FILE.exists():
         return set()
     with open(CUSTOM_DICT_FILE, encoding="utf-8", newline="") as f:
         return {strip_diacritics(row["word"].strip())
                 for row in csv.DictReader(f) if row.get("word", "").strip()}
 
-
 def save_custom_dict(words: set[str]) -> None:
+    # Persist to Supabase (global) + local CSV (fallback)
+    _settings_set("custom_dict", sorted(words))
+    CUSTOM_DICT_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(CUSTOM_DICT_FILE, "w", encoding="utf-8", newline="") as f:
         w = csv.DictWriter(f, fieldnames=["word"])
         w.writeheader()
@@ -380,7 +405,7 @@ def api_save_cell():
     col  = body.get("col")
     val  = body.get("value", "")
     path = safe_path(rel)
-    if not path or not path.exists():
+    if not path or not path.exists() or not path.is_file():
         return jsonify({"error": "File not found"}), 404
     headers, data = read_tsv(path)
     if row < 0 or row >= len(data) or col < 0 or col >= len(headers):
@@ -519,8 +544,16 @@ def api_en_grammar_batch():
     results = []
     for item in rows:
         issues = en_grammar_check(item.get("text", ""))
-        if issues:
-            results.append({"row": item["row"], "issues": issues})
+        # Filter out issues where the flagged word is in the custom dictionary
+        text = item.get("text", "")
+        filtered = []
+        for iss in issues:
+            flagged_word = strip_diacritics(text[iss["start"]:iss["end"]].lower())
+            if flagged_word in CUSTOM_DICT:
+                continue
+            filtered.append(iss)
+        if filtered:
+            results.append({"row": item["row"], "issues": filtered})
     return jsonify({"issues": results})
 
 
@@ -1448,6 +1481,7 @@ td.find-match-active { background: rgba(108,99,255,.35) !important; outline: 2px
     </div>
     <div id="import-footer">
       <span id="import-status">Select a file to begin.</span>
+      <button class="btn" id="import-cancel-btn" style="background:var(--border);color:var(--muted)">Cancel</button>
       <button class="btn" id="import-do-btn" style="background:var(--accent);color:#fff" disabled>Import Rows</button>
     </div>
   </div>
@@ -2050,7 +2084,9 @@ function applyAllHighlights() {
 const applySpellHighlights = applyAllHighlights;
 
 async function runSpellCheck() {
-  if (!state.file) { showToast('Load a file first', true); return; }
+  if (!state.file && !db.mode) { showToast('Load a file first', true); return; }
+  if (db.mode && !db.current) { showToast('Select a dataset first', true); return; }
+  if (!state.headers.length)  { showToast('No data loaded', true); return; }
 
   hilCol = state.headers.findIndex(h => h.toLowerCase().includes('hil'));
   enCol  = state.headers.findIndex(h => /\ben\b/i.test(h) || h.toLowerCase() === 'english');
@@ -2275,12 +2311,8 @@ async function onAcceptGrammar(e) {
   const corr = gramCorrections[gi];
   if (!corr) return;
 
-  const res = await fetch('/api/tsv/cell', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ path: state.file, row: corr.row, col: corr.col, value: corr.corrected })
-  });
-  if (!res.ok) { showToast('Save failed', true); return; }
+  const ok = await saveCell(corr.row, corr.col, corr.corrected);
+  if (!ok) { showToast('Save failed', true); return; }
 
   // Update in-memory state
   state.rows[corr.row][corr.col] = corr.corrected;
@@ -2341,6 +2373,7 @@ function renderEnIssues() {
       const card = document.createElement('div');
       card.className = 'en-card';
       card.dataset.ri = ri; card.dataset.ii = ii;
+      const flaggedWord = esc((state.rows[rowIssue.row][rowIssue.col] || '').slice(issue.start, issue.end));
       card.innerHTML = `
         <div class="row-ref">Row ${rowIssue.row + 1} &mdash; EN column</div>
         <div class="en-msg" data-ri="${ri}" data-ii="${ii}" title="Click to jump">${esc(issue.message)}</div>
@@ -2352,6 +2385,7 @@ function renderEnIssues() {
         <div class="card-actions">
           ${firstFix ? `<button class="accept-btn" data-ri="${ri}" data-ii="${ii}">Accept</button>` : ''}
           <button class="reject-btn" data-ri="${ri}" data-ii="${ii}">Ignore</button>
+          ${flaggedWord ? `<button class="btn-dict en-dict-btn" data-word="${flaggedWord}" data-ri="${ri}" data-ii="${ii}" title="Add to dictionary — won't be flagged again">+ Dict</button>` : ''}
         </div>`;
       list.appendChild(card);
     });
@@ -2364,6 +2398,13 @@ function renderEnIssues() {
   );
   list.querySelectorAll('.accept-btn').forEach(btn => btn.addEventListener('click', onAcceptEnIssue));
   list.querySelectorAll('.reject-btn').forEach(btn => btn.addEventListener('click', onRejectEnIssue));
+  list.querySelectorAll('.en-dict-btn').forEach(btn => btn.addEventListener('click', async e => {
+    const word = e.target.dataset.word;
+    const ri   = parseInt(e.target.dataset.ri);
+    const ii   = parseInt(e.target.dataset.ii);
+    await addDictWord(word);
+    onRejectEnIssue({ target: { dataset: { ri, ii } } });
+  }));
 }
 
 function applyEnHighlights() {
@@ -2430,12 +2471,8 @@ async function onAcceptEnIssue(e) {
   const text   = state.rows[rowIssue.row][rowIssue.col] || '';
   const newVal = text.slice(0, issue.start) + issue.replacements[0] + text.slice(issue.end);
 
-  const res = await fetch('/api/tsv/cell', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ path: state.file, row: rowIssue.row, col: rowIssue.col, value: newVal })
-  });
-  if (!res.ok) { showToast('Save failed', true); return; }
+  const ok = await saveCell(rowIssue.row, rowIssue.col, newVal);
+  if (!ok) { showToast('Save failed', true); return; }
 
   state.rows[rowIssue.row][rowIssue.col] = newVal;
   const tr = document.querySelector(`tr[data-row="${rowIssue.row}"]`);
@@ -2533,15 +2570,9 @@ async function onAcceptIssue(e) {
     return;
   }
 
-  const res = await fetch('/api/tsv/cell', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ path: state.file, row: rowIssue.row, col: rowIssue.col, value: newVal })
-  });
-
-  if (res.ok) {
+  const ok = await saveCell(rowIssue.row, rowIssue.col, newVal);
+  if (ok) {
     state.rows[rowIssue.row][rowIssue.col] = newVal;
-    // Update visible cell if on current page
     const td = document.querySelector(
       `td.cell-editable[data-row="${rowIssue.row}"][data-col="${rowIssue.col}"]`
     );
@@ -2600,40 +2631,7 @@ function setSaveState(s) {
   else                 { el.className = 'saved';   el.textContent = '● Saved'; }
 }
 
-// Patch onCellBlur to track save state
-const _origOnCellBlur = onCellBlur;
-async function onCellBlurPatched(e) {
-  const td   = e.target;
-  const row  = parseInt(td.dataset.row);
-  const col  = parseInt(td.dataset.col);
-  const val  = td.textContent;
-  const prev = state.rows[row][col];
-  if (val === prev) return;
-  pendingSaves++;
-  setSaveState('saving');
-  state.rows[row][col] = val;
-  td.classList.add('saving');
-  const res = await fetch('/api/tsv/cell', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ path: state.file, row, col, value: val })
-  });
-  td.classList.remove('saving');
-  pendingSaves--;
-  if (res.ok) {
-    td.closest('tr').classList.add('changed');
-    showToast('Saved');
-  } else {
-    state.rows[row][col] = prev;
-    td.textContent = prev;
-    showToast('Save failed', true);
-  }
-  if (pendingSaves === 0) setSaveState('saved');
-}
 
-// Replace cell-blur listener in render by overriding the function reference
-// (we swap onCellBlur reference used in addEventListener)
-function onCellBlur(e) { onCellBlurPatched(e); }
 
 // Ctrl+S — no-op (all saves are per-cell); just show confirmation
 document.addEventListener('keydown', e => {
@@ -2883,6 +2881,8 @@ async function addDictWord(word) {
   if (!dictWords.includes(data.word)) dictWords = [...dictWords, data.word].sort();
   renderDictionary();
   showToast(`"${data.word}" added to dictionary`);
+  // Re-run so the newly whitelisted word is no longer flagged
+  if (state.headers.length) runSpellCheck();
 }
 
 async function removeDictWord(word) {
@@ -2905,11 +2905,12 @@ async function onAddToDict(e) {
   applyAllHighlights();
 }
 
-$('dict-add-btn').addEventListener('click', () => {
+$('dict-add-btn').addEventListener('click', async () => {
   const val = $('dict-add-input').value;
-  if (!val.trim()) return;
-  addDictWord(val);
+  if (!val.trim()) { showToast('Enter a word first', true); return; }
+  await addDictWord(val);
   $('dict-add-input').value = '';
+  $('dict-add-input').focus();
 });
 $('dict-add-input').addEventListener('keydown', e => { if (e.key === 'Enter') $('dict-add-btn').click(); });
 
@@ -3064,6 +3065,16 @@ async function loadDatasets() {
   if (!res.ok) { showToast('Failed to load datasets', true); return; }
   db.datasets = (await res.json()).datasets || [];
   renderDatasetSelect();
+
+  // Auto-load the first available dataset
+  const first = db.datasets[0];
+  if (!first) return;
+  $('dataset-select').value = first.id;
+  if (!first.headers || !first.headers.length) {
+    openHdrModal(first, true);
+  } else {
+    await loadDbDataset(first);
+  }
 }
 
 function renderDatasetSelect() {
@@ -3176,6 +3187,28 @@ function onCellBlurDb(e) {
   setSaveState('unsaved');
 }
 
+async function saveCell(row, col, val) {
+  if (db.mode) {
+    // In DB mode: write into dirty map and flush immediately
+    const id = db.rowIds[row];
+    if (!id) return false;
+    state.rows[row][col] = val;
+    const current = db.dirty.get(id) || { position: db.rowPos[row], data: {} };
+    current.data = Object.fromEntries(state.headers.map((h, i) => [h, state.rows[row][i]]));
+    db.dirty.set(id, current);
+    db.pageCache.delete(`${db.current?.id}:${state.page}`);
+    await saveDbDirty();
+    return true;
+  }
+  // File mode: direct API call
+  const res = await fetch('/api/tsv/cell', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path: state.file, row, col, value: val })
+  });
+  return res.ok;
+}
+
 // ── DB row add ────────────────────────────────────────────────────────────────
 async function addDbRow() {
   if (!db.current) return;
@@ -3243,6 +3276,14 @@ async function saveDbDirty() {
   setSaveState('saved');
 }
 
+let _autoSaveTimer = null;
+function scheduleDbAutoSave() {
+  clearTimeout(_autoSaveTimer);
+  _autoSaveTimer = setTimeout(async () => {
+    if (db.dirty.size > 0) await saveDbDirty();
+  }, 1500);  // 1.5s after last keystroke
+}
+
 // Hook Ctrl+S into DB save when in DB mode
 document.addEventListener('keydown', e => {
   if (db.mode && (e.ctrlKey || e.metaKey) && e.key === 's') {
@@ -3251,18 +3292,78 @@ document.addEventListener('keydown', e => {
   }
 });
 
-// ── Override cell blur + delete in DB mode ────────────────────────────────────
-// Monkey-patch the existing handlers to check db.mode
-const _origOnCellBlur = onCellBlur;
-function onCellBlur(e) {
-  if (db.mode) { onCellBlurDb(e); return; }
-  _origOnCellBlur(e);
+// ── cell editing ─────────────────────────────────────────────────────────────
+async function onCellBlur(e) {
+  const td   = e.target;
+  const row  = parseInt(td.dataset.row);
+  const col  = parseInt(td.dataset.col);
+  const val  = td.textContent;
+  const prev = state.rows[row]?.[col];
+  if (val === prev) return;
+
+  // ── DB mode: dirty-track + debounced auto-save ──
+  if (db.mode) {
+    state.rows[row][col] = val;
+    td.closest('tr')?.classList.add('changed');
+    const id = db.rowIds[row];
+    if (id) {
+      const current = db.dirty.get(id) || { position: db.rowPos[row], data: {} };
+      current.data = Object.fromEntries(state.headers.map((h, i) => [h, state.rows[row][i]]));
+      db.dirty.set(id, current);
+      db.pageCache.delete(`${db.current?.id}:${state.page}`);
+      $('db-unsaved').classList.add('show');
+      setSaveState('unsaved');
+      scheduleDbAutoSave();
+    }
+    return;
+  }
+
+  // ── File mode: save immediately ──
+  if (!state.file) { td.textContent = prev; return; }
+  pendingSaves++;
+  setSaveState('saving');
+  state.rows[row][col] = val;
+  td.classList.add('saving');
+  const res = await fetch('/api/tsv/cell', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path: state.file, row, col, value: val })
+  });
+  td.classList.remove('saving');
+  pendingSaves--;
+  if (res.ok) {
+    td.closest('tr').classList.add('changed');
+    showToast('Saved');
+  } else {
+    state.rows[row][col] = prev;
+    td.textContent = prev;
+    showToast('Save failed', true);
+  }
+  if (pendingSaves === 0) setSaveState('saved');
 }
 
-const _origOnDeleteRow = onDeleteRow;
 async function onDeleteRow(e) {
-  if (db.mode) { await deleteDbRow(parseInt(e.target.dataset.row)); return; }
-  await _origOnDeleteRow(e);
+  const row = parseInt(e.target.dataset.row);
+  if (db.mode) {
+    const id = db.rowIds[row];
+    if (!id) return;
+    if (!confirm(`Delete row ${row + 1}?`)) return;
+    db.deletes.add(id);
+    db.dirty.delete(id);
+    await flushDbDeletes();
+    return;
+  }
+  if (!confirm(`Delete row ${row + 1}?`)) return;
+  const res = await fetch('/api/tsv/row/delete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path: state.file, row })
+  });
+  if (res.ok) {
+    state.rows.splice(row, 1);
+    applyFilter();
+    showToast('Row deleted');
+  }
 }
 
 // ── New dataset ───────────────────────────────────────────────────────────────
@@ -3427,6 +3528,10 @@ $('import-do-btn').addEventListener('click', async () => {
   const mapped = dataRows.map(row => Object.fromEntries(mapping.map(m => [m.dsCol, row[m.fileCol] ?? ''])));
 
   $('import-do-btn').disabled = true;
+  $('import-do-btn').style.background = 'var(--border)';
+  $('import-do-btn').style.color = 'var(--muted)';
+  $('import-cancel-btn').disabled = true;
+  $('import-cancel-btn').style.opacity = '0.4';
   $('import-progress-bar').classList.add('show');
 
   const batchSize = 500;
@@ -3438,13 +3543,23 @@ $('import-do-btn').addEventListener('click', async () => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ rows: chunk })
     });
-    if (!res.ok) { showToast('Import failed at batch ' + i, true); break; }
+    if (!res.ok) {
+      showToast('Import failed at batch ' + i, true);
+      $('import-cancel-btn').disabled = false;
+      $('import-cancel-btn').style.opacity = '';
+      break;
+    }
     inserted += chunk.length;
     $('import-progress-fill').style.width = `${Math.round(inserted / mapped.length * 100)}%`;
     $('import-status').textContent = `Importing… ${inserted.toLocaleString()} / ${mapped.length.toLocaleString()}`;
   }
 
-  $('import-do-btn').disabled = false;
+
+  $('import-do-btn').disabled = true;
+  $('import-do-btn').textContent = '✓ Imported';
+  $('import-do-btn').style.background = 'var(--border)';
+  $('import-do-btn').style.color = 'var(--muted)';
+  $('import-cancel-btn').textContent = 'Close';
   $('import-status').textContent = `✓ Imported ${inserted.toLocaleString()} rows.`;
   db.current.row_count += inserted;
   db.pageCache.clear();
@@ -3453,12 +3568,26 @@ $('import-do-btn').addEventListener('click', async () => {
   await fetchDbPage(0);
 });
 
+function closeImportModal() {
+  $('import-backdrop').classList.remove('open');
+  // Reset for next open
+  $('import-do-btn').disabled = true;
+  $('import-do-btn').textContent = 'Import Rows';
+  $('import-do-btn').style.background = 'var(--accent)';
+  $('import-do-btn').style.color = '#fff';
+  $('import-cancel-btn').textContent = 'Cancel';
+}
 $('import-btn').addEventListener('click', openImportModal);
-$('import-close').addEventListener('click', () => $('import-backdrop').classList.remove('open'));
-$('import-backdrop').addEventListener('click', e => { if (e.target === $('import-backdrop')) $('import-backdrop').classList.remove('open'); });
+$('import-close').addEventListener('click', closeImportModal);
+$('import-cancel-btn').addEventListener('click', closeImportModal);
+$('import-backdrop').addEventListener('click', e => { if (e.target === $('import-backdrop')) closeImportModal(); });
 
 // ── init ─────────────────────────────────────────────────────────────────────
-loadFiles();
+(async () => {
+  await loadFiles();
+  const status = await fetch('/api/db/status').then(r => r.json());
+  if (status.ok) await enterDbMode();
+})();
 </script>
 </body>
 </html>
