@@ -651,7 +651,7 @@ span.spell-err {
 #en-gram-list { padding: 8px; }
 .en-card { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; transition: border-color .15s, background .15s; }
 .en-card:hover { border-color: #63b3ed; }
-.en-card.active { border-color: #63b3ed; background: rgba(99,179,237,.07); }
+.en-card.active { border-color: #63b3ed; background: rgba(99,179,237,.13); box-shadow: inset 3px 0 0 #63b3ed; }
 .en-card .row-ref { font-size: 0.7rem; color: var(--muted); margin-bottom: 4px; }
 .en-card .en-msg { font-size: 0.82rem; color: var(--text); margin-bottom: 6px; line-height: 1.4; cursor: pointer; }
 .en-card .en-msg:hover { color: #63b3ed; }
@@ -659,7 +659,7 @@ span.spell-err {
 .en-card .en-fix  { font-size: 0.82rem; color: var(--spell-fix); font-weight: 500; }
 .spell-card { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; transition: border-color .15s, background .15s; }
 .spell-card:hover { border-color: var(--spell-warn); }
-.spell-card.active { border-color: var(--spell-warn); background: rgba(246,173,85,.07); }
+.spell-card.active { border-color: var(--spell-warn); background: rgba(246,173,85,.13); box-shadow: inset 3px 0 0 var(--spell-warn); }
 .spell-card .row-ref { font-size: 0.7rem; color: var(--muted); margin-bottom: 5px; }
 .spell-card .issue-body { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; font-size: 0.85rem; cursor: pointer; padding: 2px 0; border-radius: 4px; }
 .spell-card .issue-body:hover .word-error { text-decoration-color: #fc8181; }
@@ -682,6 +682,13 @@ span.en-err {
 @keyframes en-flash { 0%,100%{background:transparent;outline:none} 30%{background:rgba(99,179,237,.3);outline:2px solid #63b3ed;border-radius:2px} }
 span.en-err.flash { animation: en-flash .7s ease; }
 td.en-cell-issue { box-shadow: inset 3px 0 0 #63b3ed; }
+@keyframes cell-glow {
+  0%   { background: transparent; }
+  25%  { background: rgba(108,99,255,.28); outline: 2px solid var(--accent); border-radius: 3px; }
+  75%  { background: rgba(108,99,255,.18); outline: 2px solid var(--accent); border-radius: 3px; }
+  100% { background: transparent; outline: none; }
+}
+td.cell-glow { animation: cell-glow .9s ease; }
 .spell-card .word-error { color: var(--danger); text-decoration: underline wavy var(--danger); text-underline-offset: 3px; }
 .spell-card .arrow { color: var(--muted); }
 .spell-card .word-fix { color: var(--spell-fix); font-weight: 500; }
@@ -703,7 +710,7 @@ td.en-cell-issue { box-shadow: inset 3px 0 0 #63b3ed; }
 /* ── grammar cards ── */
 .gram-card { background: var(--bg); border: 1px solid #2d4a3e; border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; transition: border-color .15s, background .15s; }
 .gram-card:hover { border-color: #48bb78; }
-.gram-card.active { border-color: #48bb78; background: rgba(72,187,120,.06); }
+.gram-card.active { border-color: #48bb78; background: rgba(72,187,120,.13); box-shadow: inset 3px 0 0 #48bb78; }
 .gram-card .row-ref { font-size: 0.7rem; color: var(--muted); margin-bottom: 6px; }
 .gram-orig { font-size: 0.78rem; color: var(--muted); margin-bottom: 4px; white-space: pre-wrap; word-break: break-word; }
 .gram-orig span.gram-del { color: var(--danger); text-decoration: line-through; }
@@ -1581,6 +1588,14 @@ function renderGrammarCorrections() {
   list.querySelectorAll('.gram-reject-btn').forEach(btn => btn.addEventListener('click', onRejectGrammar));
 }
 
+function glowCell(td) {
+  if (!td) return;
+  td.classList.remove('cell-glow');
+  void td.offsetWidth; // force reflow to restart animation
+  td.classList.add('cell-glow');
+  setTimeout(() => td.classList.remove('cell-glow'), 950);
+}
+
 function scrollToGrammar(gi) {
   const corr = gramCorrections[gi];
   if (!corr) return;
@@ -1588,7 +1603,7 @@ function scrollToGrammar(gi) {
   // Mark card active
   $('gram-correction-list').querySelectorAll('.gram-card').forEach(c => c.classList.remove('active'));
   const activeCard = $('gram-correction-list').querySelector(`.gram-card[data-gi="${gi}"]`);
-  if (activeCard) activeCard.classList.add('active');
+  if (activeCard) { activeCard.classList.add('active'); activeCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); }
 
   // Navigate to the right page if needed
   const inPage = pageSlice().some(({ i }) => i === corr.row);
@@ -1598,14 +1613,14 @@ function scrollToGrammar(gi) {
     render();
   }
 
-  // Scroll row into view
+  // Scroll row into view and glow the cell
   const tr = document.querySelector(`tr[data-row="${corr.row}"]`);
   if (tr) tr.scrollIntoView({ behavior: 'smooth', block: 'center' });
 
-  // Flash all gram-err spans in that cell
   const td = document.querySelector(
     `td.cell-editable[data-row="${corr.row}"][data-col="${corr.col}"]`
   );
+  glowCell(td);
   if (td) {
     td.querySelectorAll('span.gram-err').forEach(span => {
       span.classList.remove('flash');
@@ -1744,7 +1759,7 @@ function scrollToEnIssue(ri, ii) {
 
   $('en-gram-list').querySelectorAll('.en-card').forEach(c => c.classList.remove('active'));
   const card = $('en-gram-list').querySelector(`.en-card[data-ri="${ri}"][data-ii="${ii}"]`);
-  if (card) card.classList.add('active');
+  if (card) { card.classList.add('active'); card.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); }
 
   const inPage = pageSlice().some(({ i }) => i === rowIssue.row);
   if (!inPage) {
@@ -1757,6 +1772,7 @@ function scrollToEnIssue(ri, ii) {
   if (tr) tr.scrollIntoView({ behavior: 'smooth', block: 'center' });
 
   const td = document.querySelector(`td.cell-editable[data-row="${rowIssue.row}"][data-col="${rowIssue.col}"]`);
+  glowCell(td);
   if (td) {
     td.querySelectorAll('span.en-err').forEach(span => {
       span.classList.remove('flash'); void span.offsetWidth; span.classList.add('flash');
@@ -1820,10 +1836,10 @@ function scrollToIssue(ri, ii) {
   if (!rowIssue) return;
   const issue = rowIssue.issues[ii];
 
-  // Mark the card as active
+  // Mark the card as active and scroll it into view in the sidebar
   $('spell-issue-list').querySelectorAll('.spell-card').forEach(c => c.classList.remove('active'));
   const activeCard = $('spell-issue-list').querySelector(`.spell-card[data-ri="${ri}"][data-ii="${ii}"]`);
-  if (activeCard) activeCard.classList.add('active');
+  if (activeCard) { activeCard.classList.add('active'); activeCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); }
 
   // If the row is on a different page, navigate there first
   const pageStart = state.page * state.pageSize;
@@ -1832,22 +1848,22 @@ function scrollToIssue(ri, ii) {
     state.page = Math.floor(
       state.filtered.findIndex(f => f.i === rowIssue.row) / state.pageSize
     );
-    render(); // re-renders and re-applies highlights via applySpellHighlights
+    render();
   }
 
-  // Scroll the row into view
+  // Scroll the row into view and glow the cell
   const tr = document.querySelector(`tr[data-row="${rowIssue.row}"]`);
   if (tr) tr.scrollIntoView({ behavior: 'smooth', block: 'center' });
 
-  // Flash the specific span inside the HIL cell
   const td = document.querySelector(
     `td.cell-editable[data-row="${rowIssue.row}"][data-col="${rowIssue.col}"]`
   );
+  glowCell(td);
   if (td) {
     td.querySelectorAll('span.spell-err').forEach(span => {
       if (span.textContent === issue.word) {
         span.classList.remove('flash');
-        void span.offsetWidth; // force reflow to restart animation
+        void span.offsetWidth;
         span.classList.add('flash');
         setTimeout(() => span.classList.remove('flash'), 750);
       }
