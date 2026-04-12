@@ -1209,13 +1209,20 @@ td.find-match-active { background: rgba(108,99,255,.35) !important; outline: 2px
 #dialect-add-grid button { padding:6px 14px; border-radius:6px; border:none; cursor:pointer; font-size:0.85rem; font-weight:500; background:var(--accent); color:#fff; white-space:nowrap; }
 #dialect-add-grid button:hover { opacity:.85; }
 #dialect-list { display:flex; flex-direction:column; gap:3px; max-height:340px; overflow-y:auto; }
-.dialect-item { display:grid; grid-template-columns:1fr 1fr auto auto; align-items:center; gap:6px; padding:5px 10px; background:var(--bg); border:1px solid var(--border); border-radius:6px; font-size:0.83rem; }
-.dialect-item .di-base { font-family:monospace; color:var(--danger); }
-.dialect-item .di-arr  { color:var(--muted); text-align:center; }
-.dialect-item .di-tgt  { font-family:monospace; color:var(--spell-fix); }
-.dialect-item .di-src  { font-size:0.68rem; color:var(--muted); text-align:right; white-space:nowrap; }
-.dialect-item button   { background:transparent; border:none; color:var(--muted); cursor:pointer; font-size:0.95rem; padding:1px 5px; border-radius:3px; }
-.dialect-item button:hover { color:var(--danger); background:rgba(252,129,129,.1); }
+.dialect-item { display:grid; grid-template-columns:1fr 24px 1fr auto auto; align-items:center; gap:8px; padding:7px 10px; background:var(--bg); border:1px solid var(--border); border-radius:6px; font-size:0.83rem; }
+.dialect-item .di-base { font-family:monospace; color:var(--spell-warn); font-weight:600; }
+.dialect-item .di-base small { font-family:sans-serif; font-size:0.6rem; font-weight:400; color:var(--muted); display:block; }
+.dialect-item .di-arr  { color:var(--muted); text-align:center; font-size:0.9rem; }
+.dialect-item .di-tgt  { font-family:monospace; color:var(--spell-fix); font-weight:600; }
+.dialect-item .di-tgt small { font-family:sans-serif; font-size:0.6rem; font-weight:400; color:var(--muted); display:block; }
+.dialect-item .di-src  { display:none; }
+.dialect-item .di-edit { background:transparent; border:none; color:var(--muted); cursor:pointer; font-size:0.85rem; padding:2px 5px; border-radius:3px; }
+.dialect-item .di-edit:hover { color:var(--accent); background:rgba(108,99,255,.12); }
+.dialect-item .di-del  { background:transparent; border:none; color:var(--muted); cursor:pointer; font-size:0.85rem; padding:2px 5px; border-radius:3px; }
+.dialect-item .di-del:hover  { color:var(--danger); background:rgba(252,129,129,.1); }
+.dialect-item.editing { border-color:var(--accent); background:var(--edit-bg); }
+.dialect-item.editing input { background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:4px; padding:3px 7px; font-size:0.83rem; font-family:monospace; width:100%; }
+.dialect-item.editing input:focus { outline:none; border-color:var(--accent); }
 #dialect-stats-line { font-size:0.75rem; color:var(--muted); margin-top:4px; }
 
 /* ── toast ── */
@@ -1530,10 +1537,13 @@ td.find-match-active { background: rgba(108,99,255,.35) !important; outline: 2px
 
       <!-- Dialect Map panel -->
       <div class="settings-panel" id="panel-dialect">
-        <p style="font-size:.82rem;color:var(--muted)">Manage word-level HIL→Ilonggo replacements. Entries are stored in <code style="font-size:.8rem;background:var(--bg);padding:1px 5px;border-radius:3px">spell-checker/words.csv</code>. Changes take effect immediately.</p>
+        <p style="font-size:.82rem;color:var(--muted)">Map <strong style="color:var(--spell-warn)">Hiligaynon</strong> words to their proper <strong style="color:var(--spell-fix)">Ilonggo (Iloilo City dialect)</strong> equivalents. Stored in <code style="font-size:.8rem;background:var(--bg);padding:1px 5px;border-radius:3px">spell-checker/words.csv</code>. Changes take effect immediately.</p>
+        <div style="display:grid;grid-template-columns:1fr 1fr auto;gap:6px;margin-bottom:4px;font-size:0.7rem;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);padding:0 2px">
+          <span>Hiligaynon</span><span>Ilonggo</span><span></span>
+        </div>
         <div id="dialect-add-grid">
-          <input id="dialect-base-input"   type="text" placeholder="Non-standard word…" autocomplete="off">
-          <input id="dialect-target-input" type="text" placeholder="Ilonggo form…"      autocomplete="off">
+          <input id="dialect-base-input"   type="text" placeholder="Hiligaynon word…" autocomplete="off">
+          <input id="dialect-target-input" type="text" placeholder="Ilonggo form…"    autocomplete="off">
           <button id="dialect-add-btn">Add</button>
         </div>
         <input id="dialect-filter" type="search" placeholder="Filter entries…" autocomplete="off">
@@ -2927,10 +2937,11 @@ async function loadDialect() {
 function renderDialect() {
   const q    = dialectQuery.toLowerCase();
   const list = $('dialect-list');
-  const vis  = q ? dialectAll.filter(e => e.base.toLowerCase().includes(q) || e.target.toLowerCase().includes(q)) : dialectAll;
+  const vis  = q ? dialectAll.filter(e =>
+    e.base.toLowerCase().includes(q) || e.target.toLowerCase().includes(q)
+  ) : dialectAll;
 
-  $('dialect-stats-line').textContent =
-    `${vis.length} of ${dialectAll.length} entries shown`;
+  $('dialect-stats-line').textContent = `${vis.length} of ${dialectAll.length} entries`;
 
   if (!vis.length) {
     list.innerHTML = `<div style="padding:14px;text-align:center;color:var(--muted);font-size:.82rem">${q ? 'No matches.' : 'No entries yet.'}</div>`;
@@ -2940,15 +2951,58 @@ function renderDialect() {
   vis.forEach(entry => {
     const item = document.createElement('div');
     item.className = 'dialect-item';
+    item.dataset.base = entry.base;
     item.innerHTML = `
-      <span class="di-base">${esc(entry.base)}</span>
+      <span class="di-base"><small>HIL</small>${esc(entry.base)}</span>
       <span class="di-arr">→</span>
-      <span class="di-tgt">${esc(entry.target)}</span>
+      <span class="di-tgt"><small>ILO</small>${esc(entry.target)}</span>
       <span class="di-src">${esc(entry.source)}</span>
-      <button data-base="${esc(entry.base)}" title="Remove mapping">✕</button>`;
-    item.querySelector('button').addEventListener('click', () => removeDialectEntry(entry.base));
+      <button class="di-edit" title="Edit">✎</button>
+      <button class="di-del"  title="Remove">✕</button>`;
+
+    item.querySelector('.di-del').addEventListener('click', () => removeDialectEntry(entry.base));
+    item.querySelector('.di-edit').addEventListener('click', () => startEditDialect(item, entry));
     list.appendChild(item);
   });
+}
+
+function startEditDialect(item, entry) {
+  item.classList.add('editing');
+  item.innerHTML = `
+    <input class="di-base-input" value="${esc(entry.base)}" placeholder="Hiligaynon">
+    <span class="di-arr">→</span>
+    <input class="di-tgt-input"  value="${esc(entry.target)}" placeholder="Ilonggo">
+    <span></span>
+    <button class="di-save-btn btn-primary btn" style="padding:3px 8px;font-size:0.75rem">Save</button>
+    <button class="di-cancel-btn" style="background:transparent;border:none;color:var(--muted);cursor:pointer;padding:3px 6px">✕</button>`;
+
+  const baseInput = item.querySelector('.di-base-input');
+  const tgtInput  = item.querySelector('.di-tgt-input');
+  baseInput.focus();
+
+  item.querySelector('.di-cancel-btn').addEventListener('click', renderDialect);
+  item.querySelector('.di-save-btn').addEventListener('click', async () => {
+    const newBase   = baseInput.value.trim();
+    const newTarget = tgtInput.value.trim();
+    if (!newBase || !newTarget) { showToast('Both fields required', true); return; }
+
+    // Remove old, add new
+    await removeDialectEntry(entry.base, true);
+    const res = await fetch('/api/dialect/add', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ base: newBase, target: newTarget })
+    });
+    if (!res.ok) { showToast('Save failed', true); return; }
+    await loadDialect();
+    showToast(`Updated: "${newBase}" → "${newTarget}"`);
+  });
+
+  [baseInput, tgtInput].forEach(inp =>
+    inp.addEventListener('keydown', e => {
+      if (e.key === 'Enter') item.querySelector('.di-save-btn').click();
+      if (e.key === 'Escape') renderDialect();
+    })
+  );
 }
 
 async function addDialectEntry() {
@@ -2968,16 +3022,15 @@ async function addDialectEntry() {
   showToast(`"${base}" → "${target}" added`);
 }
 
-async function removeDialectEntry(base) {
-  if (!confirm(`Remove mapping for "${base}"?`)) return;
+async function removeDialectEntry(base, silent = false) {
+  if (!silent && !confirm(`Remove mapping for "${base}"?`)) return;
   const res = await fetch('/api/dialect/remove', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ base })
   });
   if (!res.ok) { showToast('Remove failed', true); return; }
   dialectAll = dialectAll.filter(e => e.base.toLowerCase() !== base.toLowerCase());
-  renderDialect();
-  showToast(`"${base}" removed`);
+  if (!silent) { renderDialect(); showToast(`"${base}" removed`); }
 }
 
 $('dialect-add-btn').addEventListener('click', addDialectEntry);
