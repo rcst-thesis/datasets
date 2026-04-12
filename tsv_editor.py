@@ -681,7 +681,7 @@ HTML_TEMPLATE = r"""<!doctype html>
   --spell-warn: #f6ad55; --spell-fix: #68d391;
   font-size: 14px;
 }
-body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', system-ui, sans-serif; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', system-ui, sans-serif; height: 100dvh; display: flex; flex-direction: column; overflow: hidden; }
 
 /* ── top bar ── */
 header { display: flex; align-items: center; gap: 12px; padding: 10px 16px; background: var(--surface); border-bottom: 1px solid var(--border); flex-shrink: 0; flex-wrap: wrap; }
@@ -956,6 +956,77 @@ td.find-match-active { background: rgba(108,99,255,.35) !important; outline: 2px
 /* ── toast ── */
 .toast { position: fixed; bottom: 20px; right: 20px; background: #2d3748; color: #fff; padding: 10px 18px; border-radius: 8px; font-size: 0.85rem; opacity: 0; transition: opacity .25s; pointer-events: none; z-index: 100; }
 .toast.show { opacity: 1; }
+
+/* ── mobile overlay backdrop (shown when sidebar is open) ── */
+#sidebar-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.45); z-index: 140; }
+#sidebar-overlay.visible { display: block; }
+
+/* ── responsive ── */
+@media (max-width: 768px) {
+  /* header — file select takes full row, controls wrap below */
+  header { padding: 8px 12px; gap: 7px; }
+  header h1 { font-size: 0.92rem; }
+  #file-select { flex-basis: 100%; max-width: 100%; order: 2; }
+  #search-box  { flex: 1; max-width: none; order: 3; min-width: 0; }
+  #row-count, #add-row-btn, #spell-toggle-btn, #save-indicator, #settings-btn { order: 4; }
+  #save-indicator { font-size: 0.72rem; padding: 2px 7px; }
+
+  /* pager — hide verbose label, keep buttons tight */
+  #pager { padding: 5px 10px; gap: 6px; flex-wrap: wrap; }
+  #pager > span[style] { display: none; }
+
+  /* bulk toolbar — horizontal scroll, no wrap */
+  #bulk-toolbar { overflow-x: auto; flex-wrap: nowrap; padding: 5px 10px; scrollbar-width: none; }
+  #bulk-toolbar::-webkit-scrollbar { display: none; }
+
+  /* find panel */
+  #find-panel { flex-wrap: wrap; gap: 6px; }
+  #find-panel input { min-width: 0; flex: 1 1 140px; }
+
+  /* table — let it scroll horizontally, tighten cells */
+  #table-wrap { overflow-x: auto; }
+  table { table-layout: auto; min-width: 480px; }
+  td, thead th { padding: 4px 7px; font-size: 0.8rem; }
+  thead th.col-row-num { width: 40px; }
+  thead th.col-cb { width: 28px; }
+  thead th.col-actions { width: 40px; }
+
+  /* sidebar — slide-over overlay instead of side-by-side */
+  #spell-sidebar {
+    position: fixed;
+    top: 0; right: 0; bottom: 0;
+    z-index: 150;
+    width: min(88vw, 320px) !important;
+    border-left: 1px solid var(--border);
+    box-shadow: -6px 0 32px rgba(0,0,0,.5);
+    transform: translateX(110%);
+    transition: transform .25s ease;
+  }
+  #spell-sidebar.hidden { transform: translateX(110%); width: min(88vw, 320px) !important; border-left: 1px solid var(--border); }
+  #spell-sidebar:not(.hidden) { transform: translateX(0); }
+  #spell-sidebar-header { min-width: 0; }
+  #spell-status, #spell-sidebar-body { min-width: 0; }
+
+  /* modals — bottom sheet style */
+  #modal-backdrop, #settings-backdrop, #clean-backdrop {
+    padding-top: 0;
+    align-items: flex-end;
+  }
+  #modal, #settings-modal {
+    width: 100%;
+    max-height: 92dvh;
+    border-radius: 14px 14px 0 0;
+  }
+  #settings-modal { margin: 0; }
+
+  /* settings dialect grid — stack */
+  #dialect-add-grid { grid-template-columns: 1fr 1fr; }
+  #dialect-add-grid button { grid-column: span 2; }
+
+  /* dict add row */
+  #dict-add-row { flex-wrap: wrap; }
+  #dict-add-input { flex: 1 1 140px; }
+}
 </style>
 </head>
 <body>
@@ -1045,6 +1116,7 @@ td.find-match-active { background: rgba(108,99,255,.35) !important; outline: 2px
 </div>
 
 <div class="toast" id="toast"></div>
+<div id="sidebar-overlay"></div>
 
 <div id="settings-backdrop">
   <div id="settings-modal">
@@ -1552,10 +1624,18 @@ $('bulk-clear-btn').addEventListener('click', () => {
 // ── spell check ───────────────────────────────────────────────────────────────
 
 function toggleSpellSidebar() {
-  const sidebar = $('spell-sidebar');
+  const sidebar  = $('spell-sidebar');
   const isHidden = sidebar.classList.toggle('hidden');
   $('spell-toggle-btn').classList.toggle('active', !isHidden);
+  const isMobile = window.matchMedia('(max-width: 768px)').matches;
+  $('sidebar-overlay').classList.toggle('visible', !isHidden && isMobile);
 }
+
+$('sidebar-overlay').addEventListener('click', () => {
+  $('spell-sidebar').classList.add('hidden');
+  $('spell-toggle-btn').classList.remove('active');
+  $('sidebar-overlay').classList.remove('visible');
+});
 
 // Build cell HTML combining spell (red wavy) and grammar (amber wavy) highlights.
 // spellIssues: [{start, end, word, suggestion}]
@@ -2153,6 +2233,7 @@ $('run-check-btn').addEventListener('click', runSpellCheck);
 $('spell-close-btn').addEventListener('click', () => {
   $('spell-sidebar').classList.add('hidden');
   $('spell-toggle-btn').classList.remove('active');
+  $('sidebar-overlay').classList.remove('visible');
 });
 
 // ── save indicator ───────────────────────────────────────────────────────────
