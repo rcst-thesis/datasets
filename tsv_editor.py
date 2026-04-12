@@ -295,6 +295,59 @@ def api_delete_row():
     return jsonify({"ok": True, "total": len(data)})
 
 
+@app.post("/api/tsv/rows/delete")
+def api_delete_rows():
+    body = request.json
+    rel  = body.get("path", "")
+    rows = body.get("rows", [])
+    path = safe_path(rel)
+    if not path or not path.exists():
+        return jsonify({"error": "File not found"}), 404
+    headers, data = read_tsv(path)
+    rows_set = set(rows)
+    data = [r for i, r in enumerate(data) if i not in rows_set]
+    write_tsv(path, headers, data)
+    return jsonify({"ok": True, "total": len(data)})
+
+
+@app.post("/api/tsv/rows/move")
+def api_move_rows():
+    body      = request.json
+    rel       = body.get("path", "")
+    rows      = sorted(body.get("rows", []))
+    direction = body.get("direction", "up")
+    path      = safe_path(rel)
+    if not path or not path.exists():
+        return jsonify({"error": "File not found"}), 404
+    headers, data = read_tsv(path)
+    rows_set = set(rows)
+    if direction == "up":
+        for i in rows:
+            if i > 0 and (i - 1) not in rows_set:
+                data[i], data[i - 1] = data[i - 1], data[i]
+    else:
+        for i in reversed(rows):
+            if i < len(data) - 1 and (i + 1) not in rows_set:
+                data[i], data[i + 1] = data[i + 1], data[i]
+    write_tsv(path, headers, data)
+    return jsonify({"ok": True})
+
+
+@app.post("/api/tsv/row/insert")
+def api_insert_row():
+    body   = request.json
+    rel    = body.get("path", "")
+    after  = body.get("after", -1)   # -1 means prepend
+    path   = safe_path(rel)
+    if not path or not path.exists():
+        return jsonify({"error": "File not found"}), 404
+    headers, data = read_tsv(path)
+    insert_at = max(0, min(after + 1, len(data)))
+    data.insert(insert_at, [""] * len(headers))
+    write_tsv(path, headers, data)
+    return jsonify({"ok": True, "total": len(data), "row": insert_at})
+
+
 @app.post("/api/tsv/row/add")
 def api_add_row():
     body = request.json
@@ -490,12 +543,15 @@ header h1 { font-size: 1.05rem; font-weight: 600; color: var(--accent); white-sp
 table { width: 100%; border-collapse: collapse; table-layout: fixed; }
 thead th { position: sticky; top: 0; background: var(--surface); border-bottom: 2px solid var(--accent); padding: 8px 10px; text-align: left; font-weight: 600; color: var(--accent); white-space: nowrap; z-index: 2; }
 thead th.col-row-num { width: 56px; color: var(--muted); font-weight: 400; }
+thead th.col-cb { width: 36px; }
 thead th.col-actions { width: 52px; }
 tbody tr:hover { background: var(--row-hover); }
 tbody tr.changed { border-left: 3px solid var(--accent2); }
+tbody tr.row-selected { background: rgba(108,99,255,.18) !important; }
 td { padding: 5px 10px; border-bottom: 1px solid var(--border); vertical-align: top; word-break: break-word; }
 td.row-num { color: var(--muted); font-size: 0.78rem; text-align: right; user-select: none; cursor: pointer; border-radius: 4px; transition: color .15s, background .15s; }
 td.row-num:hover { color: var(--accent); background: rgba(108,99,255,.12); }
+td.col-cb { text-align: center; width: 36px; }
 td.cell-editable { cursor: text; white-space: pre-wrap; min-height: 28px; }
 td.cell-editable:focus { outline: 2px solid var(--accent); background: var(--edit-bg); border-radius: 3px; }
 td.cell-editable.saving { opacity: .5; }
@@ -503,6 +559,17 @@ td.col-actions { text-align: center; }
 .del-btn { background: transparent; border: none; cursor: pointer; color: var(--muted); font-size: 1rem; line-height: 1; padding: 2px 5px; border-radius: 4px; }
 .del-btn:hover { color: var(--danger); background: rgba(252,129,129,.1); }
 #empty-msg { padding: 60px; text-align: center; color: var(--muted); }
+input[type=checkbox].row-cb { cursor: pointer; accent-color: var(--accent); width: 14px; height: 14px; }
+
+/* ── bulk toolbar ── */
+#bulk-toolbar { display: none; align-items: center; gap: 8px; padding: 5px 16px; background: rgba(108,99,255,.15); border-bottom: 1px solid var(--accent); flex-shrink: 0; }
+#bulk-toolbar.visible { display: flex; }
+#bulk-count { font-size: 0.82rem; color: var(--accent); font-weight: 600; white-space: nowrap; }
+.btn-bulk { padding: 3px 11px; border-radius: 5px; border: 1px solid var(--border); cursor: pointer; font-size: 0.8rem; font-weight: 500; background: var(--surface); color: var(--text); transition: background .15s; white-space: nowrap; }
+.btn-bulk:hover { background: var(--border); }
+.btn-bulk-danger { border-color: #742a2a; color: var(--danger); }
+.btn-bulk-danger:hover { background: rgba(252,129,129,.12); }
+#bulk-toolbar .sep { width: 1px; height: 18px; background: var(--border); margin: 0 2px; }
 
 /* ── spell issue highlights ── */
 td.hil-cell-issue { box-shadow: inset 3px 0 0 var(--spell-warn); }
@@ -622,6 +689,28 @@ span.gram-err.flash { animation: gram-flash .7s ease; }
 #modal-footer { display: flex; align-items: center; justify-content: flex-end; gap: 10px; padding: 12px 18px; border-top: 1px solid var(--border); flex-shrink: 0; }
 #modal-status { color: var(--muted); font-size: 0.82rem; flex: 1; }
 
+/* ── save indicator ── */
+#save-indicator { font-size: 0.78rem; padding: 3px 10px; border-radius: 999px; white-space: nowrap; transition: background .2s, color .2s; }
+#save-indicator.saved    { background: rgba(104,211,145,.15); color: #68d391; }
+#save-indicator.saving   { background: rgba(246,173,85,.15);  color: #f6ad55; }
+#save-indicator.unsaved  { background: rgba(252,129,129,.15); color: var(--danger); }
+
+/* ── find/replace panel ── */
+#find-panel { display: none; flex-shrink: 0; background: var(--surface); border-bottom: 1px solid var(--border); padding: 6px 14px; gap: 8px; align-items: center; flex-wrap: wrap; }
+#find-panel.open { display: flex; }
+#find-panel input { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 5px; padding: 4px 9px; font-size: 0.85rem; min-width: 200px; }
+#find-panel input:focus { outline: none; border-color: var(--accent); }
+#find-panel input.has-error { border-color: var(--danger); }
+.find-btn { padding: 3px 10px; border-radius: 5px; border: 1px solid var(--border); background: var(--bg); color: var(--text); cursor: pointer; font-size: 0.8rem; white-space: nowrap; }
+.find-btn:hover { background: var(--border); }
+.find-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+#find-match-count { font-size: 0.78rem; color: var(--muted); white-space: nowrap; min-width: 70px; }
+#find-close-btn { background: transparent; border: none; color: var(--muted); cursor: pointer; font-size: 1.1rem; line-height: 1; padding: 2px 5px; margin-left: auto; }
+#find-close-btn:hover { color: var(--text); }
+.find-sep { width: 1px; height: 18px; background: var(--border); }
+td.find-match { background: rgba(246,173,85,.25) !important; outline: 1px solid #f6ad55; }
+td.find-match-active { background: rgba(108,99,255,.35) !important; outline: 2px solid var(--accent); }
+
 /* ── toast ── */
 .toast { position: fixed; bottom: 20px; right: 20px; background: #2d3748; color: #fff; padding: 10px 18px; border-radius: 8px; font-size: 0.85rem; opacity: 0; transition: opacity .25s; pointer-events: none; z-index: 100; }
 .toast.show { opacity: 1; }
@@ -636,7 +725,24 @@ span.gram-err.flash { animation: gram-flash .7s ease; }
   <span id="row-count" class="badge">0 rows</span>
   <button class="btn btn-primary" id="add-row-btn" disabled>+ Row</button>
   <button class="btn btn-spell" id="spell-toggle-btn">Spell Check</button>
+  <span id="save-indicator" class="saved">● Saved</span>
 </header>
+
+<div id="find-panel">
+  <span style="font-size:0.78rem;color:var(--muted);white-space:nowrap">Find</span>
+  <input id="find-input" type="text" placeholder="Search…" autocomplete="off">
+  <button class="find-btn" id="find-regex-btn" title="Toggle regular expressions">.*</button>
+  <button class="find-btn" id="find-case-btn" title="Toggle case sensitive">Aa</button>
+  <span id="find-match-count">No results</span>
+  <button class="find-btn" id="find-prev-btn" title="Previous match">‹</button>
+  <button class="find-btn" id="find-next-btn" title="Next match">›</button>
+  <div class="find-sep"></div>
+  <input id="replace-input" type="text" placeholder="Replace…" autocomplete="off" style="display:none">
+  <button class="find-btn" id="replace-one-btn" style="display:none">Replace</button>
+  <button class="find-btn" id="replace-all-btn" style="display:none">Replace All</button>
+  <button class="find-btn" id="find-mode-toggle" title="Toggle replace mode">⇄</button>
+  <button id="find-close-btn" title="Close (Esc)">✕</button>
+</div>
 
 <div id="pager">
   <button id="prev-btn" disabled>‹ Prev</button>
@@ -649,6 +755,21 @@ span.gram-err.flash { animation: gram-flash .7s ease; }
     <option value="200">200</option>
     <option value="500">500</option>
   </select>
+</div>
+
+<div id="bulk-toolbar">
+  <span id="bulk-count">0 selected</span>
+  <div class="sep"></div>
+  <button class="btn-bulk" id="bulk-move-up-btn" title="Move rows up">↑ Move Up</button>
+  <button class="btn-bulk" id="bulk-move-down-btn" title="Move rows down">↓ Move Down</button>
+  <div class="sep"></div>
+  <button class="btn-bulk" id="bulk-insert-above-btn">+ Insert Above</button>
+  <button class="btn-bulk" id="bulk-insert-below-btn">+ Insert Below</button>
+  <div class="sep"></div>
+  <button class="btn-bulk" id="bulk-copy-btn" title="Copy as TSV">⧉ Copy</button>
+  <div class="sep"></div>
+  <button class="btn-bulk btn-bulk-danger" id="bulk-delete-btn">✕ Delete</button>
+  <button class="btn-bulk" id="bulk-clear-btn" style="margin-left:auto">Clear Selection</button>
 </div>
 
 <div id="main-content">
@@ -701,6 +822,8 @@ span.gram-err.flash { animation: gram-flash .7s ease; }
 <script>
 const $ = id => document.getElementById(id);
 let state = { file: '', headers: [], rows: [], filtered: [], page: 0, pageSize: 100, query: '' };
+let selectedRows = new Set();   // absolute row indices into state.rows
+let lastCheckedIdx = null;      // for shift-click range select (filtered index)
 
 // ── spell + grammar state ─────────────────────────────────────────────────────
 let spellIssues       = [];   // [{row, col, issues:[{word,start,end,suggestion,type}]}]
@@ -735,8 +858,11 @@ async function loadFile(path) {
   state.file    = path;
   state.headers = data.headers;
   state.rows    = data.rows;
-  state.page    = 0;
-  // Reset spell + grammar state on new file
+  state.page    = parseInt(localStorage.getItem('tsv-page:' + path) || '0', 10);
+  // Reset selection + spell + grammar state on new file
+  selectedRows    = new Set();
+  lastCheckedIdx  = null;
+  renderBulkToolbar();
   spellIssues     = [];
   gramCorrections = [];
   hilCol          = null;
@@ -779,13 +905,18 @@ function render() {
   if (!state.headers.length) { wrap.innerHTML = '<div id="empty-msg">No data.</div>'; return; }
 
   const issueRows = new Set(spellIssues.map(r => r.row));
-  const colW = Math.floor(88 / state.headers.length);
-  let html = `<table><thead><tr><th class="col-row-num">#</th>`;
+  const colW = Math.floor(86 / state.headers.length);
+  const allPageSelected = pageSlice().length > 0 && pageSlice().every(({i}) => selectedRows.has(i));
+  let html = `<table><thead><tr>`;
+  html += `<th class="col-cb"><input type="checkbox" class="row-cb" id="cb-all" ${allPageSelected ? 'checked' : ''} title="Select all on page"></th>`;
+  html += `<th class="col-row-num">#</th>`;
   state.headers.forEach(h => { html += `<th style="width:${colW}%">${esc(h)}</th>`; });
   html += `<th class="col-actions"></th></tr></thead><tbody>`;
 
-  pageSlice().forEach(({ r, i }) => {
-    html += `<tr data-row="${i}">`;
+  pageSlice().forEach(({ r, i }, filtPageIdx) => {
+    const selCls = selectedRows.has(i) ? ' row-selected' : '';
+    html += `<tr data-row="${i}" data-filt-idx="${filtPageIdx}">`;
+    html += `<td class="col-cb"><input type="checkbox" class="row-cb" data-row="${i}" data-filt-idx="${filtPageIdx}" ${selectedRows.has(i) ? 'checked' : ''}></td>`;
     html += `<td class="row-num" data-row="${i}" title="Open row editor">${i + 1}</td>`;
     r.forEach((cell, j) => {
       const spellCls = (hilCol !== null && j === hilCol && issueRows.has(i))
@@ -809,6 +940,48 @@ function render() {
   });
   wrap.querySelectorAll('td.row-num').forEach(td => {
     td.addEventListener('click', () => openModal(parseInt(td.dataset.row)));
+  });
+
+  // Select-all checkbox
+  const cbAll = document.getElementById('cb-all');
+  if (cbAll) cbAll.addEventListener('change', () => {
+    if (cbAll.checked) pageSlice().forEach(({i}) => selectedRows.add(i));
+    else pageSlice().forEach(({i}) => selectedRows.delete(i));
+    lastCheckedIdx = null;
+    renderBulkToolbar();
+    // re-check individual checkboxes without full re-render
+    wrap.querySelectorAll('input.row-cb[data-row]').forEach(cb => {
+      cb.checked = selectedRows.has(parseInt(cb.dataset.row));
+      cb.closest('tr').classList.toggle('row-selected', cb.checked);
+    });
+  });
+
+  // Individual row checkboxes
+  wrap.querySelectorAll('input.row-cb[data-row]').forEach(cb => {
+    cb.addEventListener('click', e => {
+      const rowIdx  = parseInt(cb.dataset.row);
+      const filtIdx = parseInt(cb.dataset.filtIdx);
+      if (e.shiftKey && lastCheckedIdx !== null) {
+        const lo = Math.min(lastCheckedIdx, filtIdx);
+        const hi = Math.max(lastCheckedIdx, filtIdx);
+        const slice = pageSlice();
+        for (let k = lo; k <= hi; k++) {
+          if (k < slice.length) selectedRows.add(slice[k].i);
+        }
+      } else {
+        if (cb.checked) selectedRows.add(rowIdx);
+        else selectedRows.delete(rowIdx);
+        lastCheckedIdx = filtIdx;
+      }
+      renderBulkToolbar();
+      // sync checkboxes + row classes without full re-render
+      wrap.querySelectorAll('input.row-cb[data-row]').forEach(c => {
+        c.checked = selectedRows.has(parseInt(c.dataset.row));
+        c.closest('tr').classList.toggle('row-selected', c.checked);
+      });
+      const allSel = pageSlice().every(({i}) => selectedRows.has(i));
+      if (cbAll) cbAll.checked = allSel;
+    });
   });
 
   // Re-apply inline underlines for the freshly rendered page
@@ -981,6 +1154,108 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Escape') closeModal();
   if (e.key === 'ArrowLeft'  && e.altKey) { $('modal-prev').click(); e.preventDefault(); }
   if (e.key === 'ArrowRight' && e.altKey) { $('modal-next').click(); e.preventDefault(); }
+});
+
+// ── bulk row operations ───────────────────────────────────────────────────────
+
+function renderBulkToolbar() {
+  const n = selectedRows.size;
+  $('bulk-toolbar').classList.toggle('visible', n > 0);
+  $('bulk-count').textContent = `${n} row${n !== 1 ? 's' : ''} selected`;
+}
+
+async function bulkDelete() {
+  const rows = [...selectedRows];
+  if (!rows.length) return;
+  if (!confirm(`Delete ${rows.length} row(s)?`)) return;
+  const res = await fetch('/api/tsv/rows/delete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path: state.file, rows })
+  });
+  if (!res.ok) { showToast('Bulk delete failed', true); return; }
+  const sorted = [...rows].sort((a, b) => b - a);
+  sorted.forEach(i => state.rows.splice(i, 1));
+  selectedRows.clear();
+  lastCheckedIdx = null;
+  renderBulkToolbar();
+  applyFilter();
+  showToast(`Deleted ${rows.length} row(s)`);
+}
+
+async function bulkMove(direction) {
+  const rows = [...selectedRows];
+  if (!rows.length) return;
+  const res = await fetch('/api/tsv/rows/move', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path: state.file, rows, direction })
+  });
+  if (!res.ok) { showToast('Move failed', true); return; }
+  // Reflect move locally
+  const rowsSet = new Set(rows);
+  const sorted  = [...rows].sort((a, b) => a - b);
+  if (direction === 'up') {
+    for (const i of sorted) {
+      if (i > 0 && !rowsSet.has(i - 1)) {
+        [state.rows[i], state.rows[i - 1]] = [state.rows[i - 1], state.rows[i]];
+      }
+    }
+    selectedRows = new Set(rows.map(i => (i > 0 && !rowsSet.has(i - 1)) ? i - 1 : i));
+  } else {
+    for (const i of sorted.reverse()) {
+      if (i < state.rows.length - 1 && !rowsSet.has(i + 1)) {
+        [state.rows[i], state.rows[i + 1]] = [state.rows[i + 1], state.rows[i]];
+      }
+    }
+    selectedRows = new Set(rows.map(i => (i < state.rows.length - 1 && !rowsSet.has(i + 1)) ? i + 1 : i));
+  }
+  lastCheckedIdx = null;
+  applyFilter();
+}
+
+async function bulkInsert(position) {
+  // position: 'above' inserts before min selected row, 'below' inserts after max
+  const rows = [...selectedRows].sort((a, b) => a - b);
+  if (!rows.length) return;
+  const after = position === 'above' ? rows[0] - 1 : rows[rows.length - 1];
+  const res = await fetch('/api/tsv/row/insert', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path: state.file, after })
+  });
+  if (!res.ok) { showToast('Insert failed', true); return; }
+  const d = await res.json();
+  state.rows.splice(d.row, 0, Array(state.headers.length).fill(''));
+  // Shift selected indices if rows were inserted above them
+  if (position === 'above') {
+    selectedRows = new Set([...selectedRows].map(i => i >= d.row ? i + 1 : i));
+  }
+  applyFilter();
+  showToast('Row inserted');
+}
+
+function bulkCopy() {
+  const rows = [...selectedRows].sort((a, b) => a - b);
+  if (!rows.length) return;
+  const lines = rows.map(i => state.rows[i].join('\t'));
+  navigator.clipboard.writeText(lines.join('\n'))
+    .then(() => showToast(`Copied ${rows.length} row(s) as TSV`))
+    .catch(() => showToast('Clipboard write failed', true));
+}
+
+$('bulk-delete-btn').addEventListener('click', bulkDelete);
+$('bulk-move-up-btn').addEventListener('click', () => bulkMove('up'));
+$('bulk-move-down-btn').addEventListener('click', () => bulkMove('down'));
+$('bulk-insert-above-btn').addEventListener('click', () => bulkInsert('above'));
+$('bulk-insert-below-btn').addEventListener('click', () => bulkInsert('below'));
+$('bulk-copy-btn').addEventListener('click', bulkCopy);
+$('bulk-clear-btn').addEventListener('click', () => {
+  selectedRows.clear();
+  lastCheckedIdx = null;
+  renderBulkToolbar();
+  document.querySelectorAll('input.row-cb').forEach(cb => cb.checked = false);
+  document.querySelectorAll('tr.row-selected').forEach(tr => tr.classList.remove('row-selected'));
 });
 
 // ── spell check ───────────────────────────────────────────────────────────────
@@ -1405,11 +1680,242 @@ $('spell-close-btn').addEventListener('click', () => {
   $('spell-toggle-btn').classList.remove('active');
 });
 
+// ── save indicator ───────────────────────────────────────────────────────────
+let pendingSaves = 0;
+
+function setSaveState(s) {
+  const el = $('save-indicator');
+  el.className = 'saved'; // reset
+  if (s === 'saving')  { el.className = 'saving';  el.textContent = '● Saving…'; }
+  else if (s === 'unsaved') { el.className = 'unsaved'; el.textContent = '● Unsaved'; }
+  else                 { el.className = 'saved';   el.textContent = '● Saved'; }
+}
+
+// Patch onCellBlur to track save state
+const _origOnCellBlur = onCellBlur;
+async function onCellBlurPatched(e) {
+  const td   = e.target;
+  const row  = parseInt(td.dataset.row);
+  const col  = parseInt(td.dataset.col);
+  const val  = td.textContent;
+  const prev = state.rows[row][col];
+  if (val === prev) return;
+  pendingSaves++;
+  setSaveState('saving');
+  state.rows[row][col] = val;
+  td.classList.add('saving');
+  const res = await fetch('/api/tsv/cell', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path: state.file, row, col, value: val })
+  });
+  td.classList.remove('saving');
+  pendingSaves--;
+  if (res.ok) {
+    td.closest('tr').classList.add('changed');
+    showToast('Saved');
+  } else {
+    state.rows[row][col] = prev;
+    td.textContent = prev;
+    showToast('Save failed', true);
+  }
+  if (pendingSaves === 0) setSaveState('saved');
+}
+
+// Replace cell-blur listener in render by overriding the function reference
+// (we swap onCellBlur reference used in addEventListener)
+function onCellBlur(e) { onCellBlurPatched(e); }
+
+// Ctrl+S — no-op (all saves are per-cell); just show confirmation
+document.addEventListener('keydown', e => {
+  if ((e.ctrlKey || e.metaKey) && e.key === 's' && !$('modal-backdrop').classList.contains('open')) {
+    e.preventDefault();
+    if (!state.file) return;
+    if (pendingSaves === 0) showToast('All changes saved');
+    else showToast('Saving…');
+  }
+});
+
+// ── find / replace ───────────────────────────────────────────────────────────
+let findMatches  = [];   // [{row, col, start, end}] — across all state.rows
+let findCurrent  = -1;
+let replaceMode  = false;
+let findRegex    = false;
+let findCase     = false;
+
+function buildFindRegex(pattern) {
+  if (!pattern) return null;
+  try {
+    const flags = findCase ? 'g' : 'gi';
+    return findRegex ? new RegExp(pattern, flags) : new RegExp(escapeRegex(pattern), flags);
+  } catch (_) { return null; }
+}
+
+function runFind() {
+  const pattern = $('find-input').value;
+  $('find-input').classList.remove('has-error');
+  findMatches = [];
+  findCurrent = -1;
+  clearFindHighlights();
+  if (!pattern || !state.rows.length) { $('find-match-count').textContent = 'No results'; return; }
+
+  const re = buildFindRegex(pattern);
+  if (!re) { $('find-input').classList.add('has-error'); $('find-match-count').textContent = 'Bad regex'; return; }
+
+  state.rows.forEach((row, ri) => {
+    row.forEach((cell, ci) => {
+      re.lastIndex = 0;
+      let m;
+      while ((m = re.exec(cell)) !== null) {
+        findMatches.push({ row: ri, col: ci, start: m.index, end: m.index + m[0].length });
+        if (m[0].length === 0) break; // guard zero-width matches
+      }
+    });
+  });
+
+  $('find-match-count').textContent = findMatches.length ? `1 of ${findMatches.length}` : 'No results';
+  if (findMatches.length) { findCurrent = 0; jumpToMatch(0); }
+}
+
+function clearFindHighlights() {
+  document.querySelectorAll('td.find-match, td.find-match-active').forEach(td => {
+    td.classList.remove('find-match', 'find-match-active');
+  });
+}
+
+function jumpToMatch(idx) {
+  if (!findMatches.length) return;
+  findCurrent = ((idx % findMatches.length) + findMatches.length) % findMatches.length;
+  $('find-match-count').textContent = `${findCurrent + 1} of ${findMatches.length}`;
+  clearFindHighlights();
+
+  // Highlight all matches on the current page
+  const pageRowSet = new Set(pageSlice().map(({i}) => i));
+  findMatches.forEach((m, k) => {
+    if (!pageRowSet.has(m.row)) return;
+    const td = document.querySelector(`td.cell-editable[data-row="${m.row}"][data-col="${m.col}"]`);
+    if (td) td.classList.add(k === findCurrent ? 'find-match-active' : 'find-match');
+  });
+
+  const cur = findMatches[findCurrent];
+  // Navigate to the page containing the active match
+  const filtIdx = state.filtered.findIndex(f => f.i === cur.row);
+  if (filtIdx !== -1) {
+    const targetPage = Math.floor(filtIdx / state.pageSize);
+    if (targetPage !== state.page) {
+      state.page = targetPage;
+      render();
+      // Re-highlight after render
+      clearFindHighlights();
+      const pageRowSet2 = new Set(pageSlice().map(({i}) => i));
+      findMatches.forEach((m, k) => {
+        if (!pageRowSet2.has(m.row)) return;
+        const td = document.querySelector(`td.cell-editable[data-row="${m.row}"][data-col="${m.col}"]`);
+        if (td) td.classList.add(k === findCurrent ? 'find-match-active' : 'find-match');
+      });
+    }
+  }
+
+  const activeTd = document.querySelector(`td.find-match-active`);
+  if (activeTd) activeTd.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+async function doReplace(allMatches) {
+  const pattern = $('find-input').value;
+  const repl    = $('replace-input').value;
+  if (!pattern || !state.file) return;
+  const re = buildFindRegex(pattern);
+  if (!re) return;
+
+  const targets = allMatches ? findMatches : (findCurrent >= 0 ? [findMatches[findCurrent]] : []);
+  const changed = new Map(); // row → new value
+
+  for (const m of targets) {
+    const original = changed.has(m.row) ? changed.get(m.row)[m.col] : state.rows[m.row][m.col];
+    // Build per-row replacement
+    if (!changed.has(m.row)) changed.set(m.row, [...state.rows[m.row]]);
+  }
+  // Apply replacements per row
+  for (const [ri, rowData] of changed.entries()) {
+    state.rows[ri].forEach((cell, ci) => {
+      re.lastIndex = 0;
+      const newVal = cell.replace(re, repl);
+      if (newVal !== cell) rowData[ci] = newVal;
+    });
+  }
+
+  setSaveState('saving');
+  let count = 0;
+  for (const [ri, rowData] of changed.entries()) {
+    for (let ci = 0; ci < rowData.length; ci++) {
+      if (rowData[ci] !== state.rows[ri][ci]) {
+        pendingSaves++;
+        const res = await fetch('/api/tsv/cell', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: state.file, row: ri, col: ci, value: rowData[ci] })
+        });
+        pendingSaves--;
+        if (res.ok) { state.rows[ri][ci] = rowData[ci]; count++; }
+      }
+    }
+  }
+  if (pendingSaves === 0) setSaveState('saved');
+  showToast(`Replaced ${count} occurrence(s)`);
+  runFind();
+}
+
+function openFindPanel(withReplace = false) {
+  $('find-panel').classList.add('open');
+  replaceMode = withReplace;
+  $('replace-input').style.display  = withReplace ? '' : 'none';
+  $('replace-one-btn').style.display = withReplace ? '' : 'none';
+  $('replace-all-btn').style.display = withReplace ? '' : 'none';
+  setTimeout(() => $('find-input').focus(), 30);
+}
+
+function closeFindPanel() {
+  $('find-panel').classList.remove('open');
+  clearFindHighlights();
+  findMatches  = [];
+  findCurrent  = -1;
+}
+
+$('find-input').addEventListener('input', runFind);
+$('find-regex-btn').addEventListener('click', () => {
+  findRegex = !findRegex;
+  $('find-regex-btn').classList.toggle('active', findRegex);
+  runFind();
+});
+$('find-case-btn').addEventListener('click', () => {
+  findCase = !findCase;
+  $('find-case-btn').classList.toggle('active', findCase);
+  runFind();
+});
+$('find-prev-btn').addEventListener('click', () => jumpToMatch(findCurrent - 1));
+$('find-next-btn').addEventListener('click', () => jumpToMatch(findCurrent + 1));
+$('find-mode-toggle').addEventListener('click', () => openFindPanel(!replaceMode));
+$('find-close-btn').addEventListener('click', closeFindPanel);
+$('replace-one-btn').addEventListener('click', () => doReplace(false));
+$('replace-all-btn').addEventListener('click', () => doReplace(true));
+$('find-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter') { e.shiftKey ? jumpToMatch(findCurrent - 1) : jumpToMatch(findCurrent + 1); }
+  if (e.key === 'Escape') closeFindPanel();
+});
+
+// Global keyboard shortcuts
+document.addEventListener('keydown', e => {
+  if ($('modal-backdrop').classList.contains('open')) return;
+  if ((e.ctrlKey || e.metaKey) && e.key === 'f') { e.preventDefault(); openFindPanel(false); }
+  if ((e.ctrlKey || e.metaKey) && e.key === 'h') { e.preventDefault(); openFindPanel(true); }
+  if (e.key === 'Escape' && $('find-panel').classList.contains('open')) closeFindPanel();
+});
+
 // ── controls ─────────────────────────────────────────────────────────────────
 $('file-select').addEventListener('change', e => { if (e.target.value) loadFile(e.target.value); });
 $('search-box').addEventListener('input', e => { state.query = e.target.value; applyFilter(); });
-$('prev-btn').addEventListener('click', () => { state.page--; render(); $('table-wrap').scrollTop = 0; if (state.file) runSpellCheck(); });
-$('next-btn').addEventListener('click', () => { state.page++; render(); $('table-wrap').scrollTop = 0; if (state.file) runSpellCheck(); });
+$('prev-btn').addEventListener('click', () => { state.page--; if (state.file) localStorage.setItem('tsv-page:' + state.file, state.page); render(); $('table-wrap').scrollTop = 0; if (state.file) runSpellCheck(); });
+$('next-btn').addEventListener('click', () => { state.page++; if (state.file) localStorage.setItem('tsv-page:' + state.file, state.page); render(); $('table-wrap').scrollTop = 0; if (state.file) runSpellCheck(); });
 $('page-size').addEventListener('change', e => { state.pageSize = parseInt(e.target.value); applyFilter(); });
 
 // ── toast ─────────────────────────────────────────────────────────────────────
