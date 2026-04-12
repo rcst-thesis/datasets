@@ -15,6 +15,48 @@ BASE_DIR  = Path(__file__).parent
 SPELL_DIR = BASE_DIR / "spell-checker"
 app = Flask(__name__)
 
+# ── Supabase / database ───────────────────────────────────────────────────────
+_sb_instance = None
+DB_OK        = False
+
+try:
+    from supabase import create_client as _sb_create
+    _SB_PKG = True
+except ImportError:
+    _SB_PKG = False
+    print("[warn] supabase not installed — pip install supabase")
+
+def _init_db() -> bool:
+    global _sb_instance, DB_OK
+    if not _SB_PKG:
+        return False
+    url = os.environ.get("SUPABASE_URL", "").strip()
+    key = os.environ.get("SUPABASE_KEY", "").strip()
+    if not url or not key:
+        print("[info] SUPABASE_URL / SUPABASE_KEY not set — DB mode disabled")
+        return False
+    try:
+        _sb_instance = _sb_create(url, key)
+        DB_OK = True
+        print(f"[info] Supabase connected → {url}")
+        return True
+    except Exception as e:
+        print(f"[warn] Supabase init failed: {e}")
+        return False
+
+_init_db()
+
+def sb():
+    if not DB_OK:
+        raise RuntimeError("Database not configured. Set SUPABASE_URL and SUPABASE_KEY, then restart.")
+    return _sb_instance
+
+def _db_err():
+    """Return 503 JSON if DB unavailable, else None."""
+    if not DB_OK:
+        return jsonify({"error": "Database not configured — set SUPABASE_URL and SUPABASE_KEY"}), 503
+    return None
+
 # ── load cleaner ──────────────────────────────────────────────────────────────
 import importlib.util as _ilu
 _clean_spec = _ilu.spec_from_file_location("clean", BASE_DIR / "clean.py")
@@ -663,6 +705,187 @@ def api_clean():
     })
 
 
+# ── DB routes ────────────────────────────────────────────────────────────────
+
+@app.get("/api/db/status")
+def api_db_status():
+    return jsonify({"ok": DB_OK, "pkg": _SB_PKG})
+
+
+@app.get("/api/db/datasets")
+def api_db_list():
+    g = _db_err()
+    if g: return g
+    try:
+        res = sb().table("datasets") \
+            .select("id,name,headers,row_count,created_at") \
+            .order("created_at", desc=True).execute()
+        return jsonify({"datasets": res.data})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.post("/api/db/datasets")
+def api_db_create():
+    g = _db_err()
+    if g: return g
+    body    = request.json or {}
+    name    = body.get("name", "").strip()
+    headers = body.get("headers", [])
+    if not name:
+        return jsonify({"error": "name required"}), 400
+    try:
+        res = sb().table("datasets") \
+            .insert({"name": name, "headers": headers, "row_count": 0}).execute()
+        return jsonify({"dataset": res.data[0]})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.patch("/api/db/datasets/<ds_id>")
+def api_db_update(ds_id):
+    g = _db_err()
+    if g: return g
+    body   = request.json or {}
+    update = {k: body[k] for k in ("name", "headers") if k in body}
+    if not update:
+        return jsonify({"error": "nothing to update"}), 400
+    try:
+        res = sb().table("datasets").update(update).eq("id", ds_id).execute()
+        return jsonify({"dataset": res.data[0] if res.data else {}})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.delete("/api/db/datasets/<ds_id>")
+def api_db_delete(ds_id):
+    g = _db_err()
+    if g: return g
+    try:
+        sb().table("datasets").delete().eq("id", ds_id).execute()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.get("/api/db/datasets/<ds_id>/rows")
+def api_db_rows(ds_id):
+    g = _db_err()
+    if g: return g
+    page = max(0, int(request.args.get("page", 0)))
+    size = min(max(1, int(request.args.get("size", 100))), 500)
+    start, end = page * size, page * size + size - 1
+    try:
+        res = sb().table("corpus_rows") \
+            .select("id,position,data") \
+            .eq("dataset_id", ds_id) \
+            .order("position") \
+            .range(start, end).execute()
+        return jsonify({"rows": res.data, "page": page, "size": size})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.post("/api/db/datasets/<ds_id>/rows/save")
+def api_db_save_rows(ds_id):
+    """Batch upsert dirty rows. Each item: {id, position, data}."""
+    g = _db_err()
+    if g: return g
+    rows = (request.json or {}).get("rows", [])
+    if not rows:
+        return jsonify({"ok": True, "count": 0})
+    try:
+        payload = [
+            {"id": r["id"], "dataset_id": ds_id,
+             "position": r["position"], "data": r["data"]}
+            for r in rows
+        ]
+        sb().table("corpus_rows").upsert(payload, on_conflict="id").execute()
+        return jsonify({"ok": True, "count": len(payload)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.post("/api/db/datasets/<ds_id>/rows/delete")
+def api_db_delete_rows(ds_id):
+    g = _db_err()
+    if g: return g
+    ids = (request.json or {}).get("ids", [])
+    if not ids:
+        return jsonify({"ok": True})
+    try:
+        sb().table("corpus_rows").delete().in_("id", ids).execute()
+        cnt = sb().table("corpus_rows").select("id", count="exact") \
+            .eq("dataset_id", ds_id).execute()
+        sb().table("datasets").update({"row_count": cnt.count or 0}) \
+            .eq("id", ds_id).execute()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.post("/api/db/datasets/<ds_id>/import")
+def api_db_import(ds_id):
+    """
+    Bulk insert rows parsed from TSV (already mapped to header keys client-side).
+    Body: { rows: [{header: value, ...}, ...] }
+    Sends in caller-defined batches; call multiple times for large files.
+    """
+    g = _db_err()
+    if g: return g
+    rows_data = (request.json or {}).get("rows", [])
+    if not rows_data:
+        return jsonify({"ok": True, "inserted": 0})
+    try:
+        pos_res = sb().table("corpus_rows") \
+            .select("position").eq("dataset_id", ds_id) \
+            .order("position", desc=True).limit(1).execute()
+        next_pos = (pos_res.data[0]["position"] + 1) if pos_res.data else 0
+
+        payload = [
+            {"dataset_id": ds_id, "position": next_pos + i, "data": row}
+            for i, row in enumerate(rows_data)
+        ]
+        sb().table("corpus_rows").insert(payload).execute()
+        # Update cached row_count
+        sb().table("datasets") \
+            .update({"row_count": next_pos + len(payload)}) \
+            .eq("id", ds_id).execute()
+        return jsonify({"ok": True, "inserted": len(payload)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.get("/api/db/datasets/<ds_id>/export")
+def api_db_export(ds_id):
+    """Stream entire dataset as a TSV download."""
+    g = _db_err()
+    if g: return g
+    try:
+        ds   = sb().table("datasets").select("name,headers").eq("id", ds_id).single().execute().data
+        hdrs = ds.get("headers", [])
+        lines = ["\t".join(hdrs)]
+        offset, chunk = 0, 1000
+        while True:
+            res = sb().table("corpus_rows") \
+                .select("data").eq("dataset_id", ds_id) \
+                .order("position").range(offset, offset + chunk - 1).execute()
+            for r in res.data:
+                lines.append("\t".join(str(r["data"].get(h, "")) for h in hdrs))
+            if len(res.data) < chunk:
+                break
+            offset += chunk
+        fname = re.sub(r"[^\w\-.]", "_", ds["name"]) + ".tsv"
+        return app.response_class(
+            response="\n".join(lines),
+            status=200,
+            mimetype="text/tab-separated-values",
+            headers={"Content-Disposition": f'attachment; filename="{fname}"'}
+        )
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 # ── HTML / CSS / JS (single-file SPA) ────────────────────────────────────────
 
 HTML_TEMPLATE = r"""<!doctype html>
@@ -957,6 +1180,61 @@ td.find-match-active { background: rgba(108,99,255,.35) !important; outline: 2px
 .toast { position: fixed; bottom: 20px; right: 20px; background: #2d3748; color: #fff; padding: 10px 18px; border-radius: 8px; font-size: 0.85rem; opacity: 0; transition: opacity .25s; pointer-events: none; z-index: 100; }
 .toast.show { opacity: 1; }
 
+/* ── DB mode ── */
+.btn-db { background:#1a3a5c; color:#63b3ed; border:1px solid #2b6cb0; }
+.btn-db.active { background:#2b6cb0; color:#fff; border-color:#3182ce; }
+#db-controls { display:none; align-items:center; gap:8px; flex-wrap:wrap; }
+#db-controls.show { display:flex; }
+#dataset-select { flex:1; max-width:340px; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:6px; padding:5px 10px; font-size:0.9rem; }
+#db-unsaved { font-size:0.78rem; padding:3px 10px; border-radius:999px; white-space:nowrap; display:none; }
+#db-unsaved.show { display:inline; background:rgba(252,129,129,.15); color:var(--danger); }
+
+/* ── import modal ── */
+#import-backdrop { display:none; position:fixed; inset:0; background:rgba(0,0,0,.65); backdrop-filter:blur(3px); z-index:350; align-items:center; justify-content:center; padding:16px; }
+#import-backdrop.open { display:flex; }
+#import-modal { background:var(--surface); border:1px solid var(--border); border-radius:12px; width:min(820px,100%); max-height:90vh; display:flex; flex-direction:column; box-shadow:0 24px 64px rgba(0,0,0,.6); }
+#import-header { display:flex; align-items:center; gap:10px; padding:14px 18px; border-bottom:1px solid var(--border); flex-shrink:0; }
+#import-header h2 { font-size:1rem; font-weight:600; color:var(--accent); flex:1; }
+#import-close { background:transparent; border:none; color:var(--muted); font-size:1.3rem; cursor:pointer; line-height:1; padding:2px 6px; }
+#import-close:hover { color:var(--text); }
+#import-body { flex:1; overflow-y:auto; padding:18px; display:flex; flex-direction:column; gap:14px; }
+#import-footer { display:flex; align-items:center; gap:10px; padding:12px 18px; border-top:1px solid var(--border); flex-shrink:0; }
+#import-status { flex:1; font-size:0.82rem; color:var(--muted); }
+#import-progress-bar { width:100%; height:6px; background:var(--border); border-radius:3px; overflow:hidden; display:none; }
+#import-progress-bar.show { display:block; }
+#import-progress-fill { height:100%; background:var(--accent); border-radius:3px; transition:width .2s; width:0%; }
+#drop-zone { border:2px dashed var(--border); border-radius:10px; padding:32px; text-align:center; color:var(--muted); cursor:pointer; transition:border-color .15s, background .15s; }
+#drop-zone:hover, #drop-zone.drag-over { border-color:var(--accent); background:rgba(108,99,255,.06); color:var(--text); }
+#drop-zone p { font-size:0.88rem; margin-top:6px; }
+#import-options { display:flex; align-items:center; gap:16px; flex-wrap:wrap; font-size:0.85rem; color:var(--text); }
+#import-options label { display:flex; align-items:center; gap:6px; cursor:pointer; }
+
+/* column mapping table */
+#col-map-wrap { overflow-x:auto; }
+#col-map-table { width:100%; border-collapse:collapse; font-size:0.83rem; }
+#col-map-table th { background:var(--surface); padding:7px 10px; text-align:left; border-bottom:2px solid var(--accent); color:var(--accent); white-space:nowrap; font-weight:600; }
+#col-map-table td { padding:6px 10px; border-bottom:1px solid var(--border); vertical-align:top; }
+#col-map-table td.sample-cell { color:var(--muted); font-size:0.78rem; max-width:160px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.col-map-select { background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:5px; padding:4px 8px; font-size:0.82rem; width:100%; }
+.col-map-select:focus { outline:none; border-color:var(--accent); }
+
+/* ── header-config modal ── */
+#hdr-backdrop { display:none; position:fixed; inset:0; background:rgba(0,0,0,.65); backdrop-filter:blur(3px); z-index:360; align-items:center; justify-content:center; padding:16px; }
+#hdr-backdrop.open { display:flex; }
+#hdr-modal { background:var(--surface); border:1px solid var(--border); border-radius:12px; width:min(480px,100%); display:flex; flex-direction:column; box-shadow:0 24px 64px rgba(0,0,0,.6); max-height:90vh; }
+#hdr-modal-header { display:flex; align-items:center; padding:14px 18px; border-bottom:1px solid var(--border); }
+#hdr-modal-header h2 { font-size:1rem; font-weight:600; color:var(--accent); flex:1; }
+#hdr-modal-body { padding:18px; overflow-y:auto; }
+#hdr-list { display:flex; flex-direction:column; gap:6px; margin-bottom:12px; }
+.hdr-row { display:flex; align-items:center; gap:6px; }
+.hdr-row input { flex:1; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:6px; padding:6px 10px; font-size:0.88rem; }
+.hdr-row input:focus { outline:none; border-color:var(--accent); }
+.hdr-row button { background:transparent; border:none; color:var(--muted); cursor:pointer; font-size:1rem; padding:2px 5px; border-radius:3px; }
+.hdr-row button:hover { color:var(--danger); background:rgba(252,129,129,.1); }
+#hdr-add-btn { background:transparent; border:1px dashed var(--border); color:var(--muted); border-radius:6px; padding:6px 12px; cursor:pointer; font-size:0.82rem; width:100%; }
+#hdr-add-btn:hover { border-color:var(--accent); color:var(--accent); }
+#hdr-modal-footer { display:flex; gap:8px; padding:12px 18px; border-top:1px solid var(--border); justify-content:flex-end; }
+
 /* ── mobile overlay backdrop (shown when sidebar is open) ── */
 #sidebar-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.45); z-index: 140; }
 #sidebar-overlay.visible { display: block; }
@@ -1033,7 +1311,17 @@ td.find-match-active { background: rgba(108,99,255,.35) !important; outline: 2px
 
 <header>
   <h1>TSV Editor</h1>
+  <!-- file mode controls -->
   <select id="file-select"><option value="">— select a file —</option></select>
+  <!-- db mode controls -->
+  <span id="db-controls">
+    <select id="dataset-select"><option value="">— select dataset —</option></select>
+    <button class="btn" id="new-dataset-btn" style="background:var(--border);color:var(--muted)" title="New dataset">+ Dataset</button>
+    <button class="btn" id="import-btn" style="background:var(--border);color:var(--muted)" title="Import TSV">📥 Import</button>
+    <button class="btn" id="export-btn" style="background:var(--border);color:var(--muted)" title="Export TSV" disabled>📤 Export</button>
+    <span id="db-unsaved" title="Unsaved changes — Ctrl+S to sync">● Unsaved</span>
+  </span>
+  <button class="btn btn-db" id="db-mode-btn" title="Switch to cloud database mode">☁ DB</button>
   <input id="search-box" type="search" placeholder="Search rows…">
   <span id="row-count" class="badge">0 rows</span>
   <button class="btn btn-primary" id="add-row-btn" disabled>+ Row</button>
@@ -1117,6 +1405,62 @@ td.find-match-active { background: rgba(108,99,255,.35) !important; outline: 2px
 
 <div class="toast" id="toast"></div>
 <div id="sidebar-overlay"></div>
+
+<!-- ── import modal ── -->
+<div id="import-backdrop">
+  <div id="import-modal">
+    <div id="import-header">
+      <h2>📥 Import TSV</h2>
+      <button id="import-close">✕</button>
+    </div>
+    <div id="import-body">
+      <div id="drop-zone" tabindex="0">
+        <div style="font-size:2rem">📂</div>
+        <strong>Drop a TSV file here</strong>
+        <p>or click to browse</p>
+        <input type="file" id="import-file-input" accept=".tsv,.txt,.csv" style="display:none">
+      </div>
+      <div id="import-options" style="display:none">
+        <label><input type="checkbox" id="import-has-header" checked> First row is a header</label>
+        <span id="import-file-name" style="color:var(--muted);font-size:0.8rem"></span>
+      </div>
+      <div id="col-map-wrap" style="display:none">
+        <p style="font-size:0.82rem;color:var(--muted);margin-bottom:8px">Map each file column to a dataset column, or skip it.</p>
+        <table id="col-map-table">
+          <thead><tr>
+            <th>File column</th>
+            <th>Sample values (up to 5)</th>
+            <th>Maps to dataset column</th>
+          </tr></thead>
+          <tbody id="col-map-body"></tbody>
+        </table>
+      </div>
+      <div id="import-progress-bar"><div id="import-progress-fill"></div></div>
+    </div>
+    <div id="import-footer">
+      <span id="import-status">Select a file to begin.</span>
+      <button class="btn" id="import-do-btn" style="background:var(--accent);color:#fff" disabled>Import Rows</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── header-config modal ── -->
+<div id="hdr-backdrop">
+  <div id="hdr-modal">
+    <div id="hdr-modal-header">
+      <h2 id="hdr-modal-title">Configure Columns</h2>
+    </div>
+    <div id="hdr-modal-body">
+      <p style="font-size:.82rem;color:var(--muted);margin-bottom:14px">Define the column names for this dataset. Order matters — it determines the TSV column order.</p>
+      <div id="hdr-list"></div>
+      <button id="hdr-add-btn">+ Add column</button>
+    </div>
+    <div id="hdr-modal-footer">
+      <button class="btn" id="hdr-cancel-btn" style="background:var(--border)">Cancel</button>
+      <button class="btn btn-primary" id="hdr-save-btn">Save Columns</button>
+    </div>
+  </div>
+</div>
 
 <div id="settings-backdrop">
   <div id="settings-modal">
@@ -2660,6 +3004,449 @@ function showToast(msg, err = false) {
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => t.classList.remove('show'), 1800);
 }
+
+// ── DB mode ──────────────────────────────────────────────────────────────────
+
+// Client-side DB state
+const db = {
+  mode:      false,
+  datasets:  [],
+  current:   null,       // {id, name, headers: [], row_count}
+  rowIds:    [],         // UUID per displayed row (parallel to state.rows)
+  rowPos:    [],         // position per displayed row
+  pageCache: new Map(),  // `${dsId}:${page}` → {rowIds, rowPos, rows}
+  dirty:     new Map(),  // rowId → {position, data}
+  deletes:   new Set(),  // rowIds pending delete
+};
+
+// ── mode toggle ───────────────────────────────────────────────────────────────
+async function enterDbMode() {
+  const status = await fetch('/api/db/status').then(r => r.json());
+  if (!status.ok) {
+    showToast('DB not configured — set SUPABASE_URL and SUPABASE_KEY', true);
+    return;
+  }
+  db.mode = true;
+  $('db-mode-btn').classList.add('active');
+  $('db-controls').classList.add('show');
+  $('file-select').style.display = 'none';
+  $('add-row-btn').disabled = true;
+  await loadDatasets();
+}
+
+function exitDbMode() {
+  db.mode = false;
+  $('db-mode-btn').classList.remove('active');
+  $('db-controls').classList.remove('show');
+  $('file-select').style.display = '';
+  // Clear DB state from table
+  state.file = ''; state.headers = []; state.rows = []; state.filtered = [];
+  db.rowIds = []; db.rowPos = [];
+  render();
+}
+
+$('db-mode-btn').addEventListener('click', () => {
+  if (db.mode) exitDbMode(); else enterDbMode();
+});
+
+// ── dataset list ──────────────────────────────────────────────────────────────
+async function loadDatasets() {
+  const res = await fetch('/api/db/datasets');
+  if (!res.ok) { showToast('Failed to load datasets', true); return; }
+  db.datasets = (await res.json()).datasets || [];
+  renderDatasetSelect();
+}
+
+function renderDatasetSelect() {
+  const sel = $('dataset-select');
+  sel.innerHTML = '<option value="">— select dataset —</option>';
+  db.datasets.forEach(ds => {
+    const o = document.createElement('option');
+    o.value = ds.id;
+    o.textContent = `${ds.name} (${ds.row_count.toLocaleString()} rows)`;
+    sel.appendChild(o);
+  });
+}
+
+$('dataset-select').addEventListener('change', async e => {
+  const id = e.target.value;
+  if (!id) return;
+  const ds = db.datasets.find(d => d.id === id);
+  if (!ds) return;
+  if (!ds.headers || !ds.headers.length) {
+    openHdrModal(ds, true);
+  } else {
+    await loadDbDataset(ds);
+  }
+});
+
+async function loadDbDataset(ds) {
+  db.current = ds;
+  db.pageCache.clear();
+  db.dirty.clear();
+  db.deletes.clear();
+  $('db-unsaved').classList.remove('show');
+  $('export-btn').disabled = false;
+  $('add-row-btn').disabled = false;
+  state.headers = [...ds.headers];
+  state.page    = 0;
+  state.query   = '';
+  $('search-box').value = '';
+  await fetchDbPage(0);
+}
+
+async function fetchDbPage(page) {
+  const dsId = db.current?.id;
+  if (!dsId) return;
+  const cacheKey = `${dsId}:${page}`;
+
+  if (db.pageCache.has(cacheKey)) {
+    applyDbPage(db.pageCache.get(cacheKey), page);
+    return;
+  }
+
+  const res = await fetch(`/api/db/datasets/${dsId}/rows?page=${page}&size=${state.pageSize}`);
+  if (!res.ok) { showToast('Failed to fetch rows', true); return; }
+  const data = await res.json();
+
+  const rowIds = data.rows.map(r => r.id);
+  const rowPos = data.rows.map(r => r.position);
+  const rows   = data.rows.map(r => (db.current?.headers || []).map(h => r.data[h] ?? ''));
+
+  db.pageCache.set(cacheKey, { rowIds, rowPos, rows });
+  applyDbPage({ rowIds, rowPos, rows }, page);
+}
+
+function applyDbPage({ rowIds, rowPos, rows }, page) {
+  db.rowIds = rowIds;
+  db.rowPos  = rowPos;
+  // Merge any pending dirty edits into display
+  state.rows = rows.map((row, i) => {
+    const id = rowIds[i];
+    if (db.dirty.has(id)) {
+      return (db.current?.headers || []).map(h => db.dirty.get(id).data[h] ?? '');
+    }
+    return row;
+  });
+  state.filtered = state.rows.map((r, i) => ({ r, i }));
+  state.page     = page;
+  $('row-count').textContent = `${db.current?.row_count?.toLocaleString() ?? 0} rows`;
+  const totalPages = Math.max(1, Math.ceil((db.current?.row_count || 0) / state.pageSize));
+  $('page-info').textContent  = `Page ${page + 1} / ${totalPages}`;
+  $('prev-btn').disabled      = page === 0;
+  $('next-btn').disabled      = page >= totalPages - 1;
+  render();
+}
+
+// Override page navigation for DB mode
+const _origPrev = $('prev-btn').onclick;
+const _origNext = $('next-btn').onclick;
+$('prev-btn').addEventListener('click', () => { if (db.mode) { fetchDbPage(state.page - 1); $('table-wrap').scrollTop = 0; } });
+$('next-btn').addEventListener('click', () => { if (db.mode) { fetchDbPage(state.page + 1); $('table-wrap').scrollTop = 0; } });
+
+// ── DB cell editing (dirty tracking only — no server call) ────────────────────
+function onCellBlurDb(e) {
+  const td  = e.target;
+  const row = parseInt(td.dataset.row);
+  const col = parseInt(td.dataset.col);
+  const val = td.textContent;
+  if (val === state.rows[row]?.[col]) return;
+  state.rows[row][col] = val;
+  td.closest('tr')?.classList.add('changed');
+
+  const id = db.rowIds[row];
+  if (!id) return;
+  const current = db.dirty.get(id) || { position: db.rowPos[row], data: {} };
+  current.data = Object.fromEntries(state.headers.map((h, i) => [h, state.rows[row][i]]));
+  db.dirty.set(id, current);
+
+  // Invalidate this page's cache so re-visit shows latest
+  db.pageCache.delete(`${db.current?.id}:${state.page}`);
+
+  $('db-unsaved').classList.add('show');
+  setSaveState('unsaved');
+}
+
+// ── DB row add ────────────────────────────────────────────────────────────────
+async function addDbRow() {
+  if (!db.current) return;
+  const res = await fetch(`/api/db/datasets/${db.current.id}/import`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ rows: [Object.fromEntries(state.headers.map(h => [h, '']))] })
+  });
+  if (!res.ok) { showToast('Add row failed', true); return; }
+  db.current.row_count++;
+  db.pageCache.clear();
+  const lastPage = Math.ceil(db.current.row_count / state.pageSize) - 1;
+  await fetchDbPage(lastPage);
+  showToast('Row added');
+}
+
+// ── DB row delete ─────────────────────────────────────────────────────────────
+async function deleteDbRow(rowIdx) {
+  const id = db.rowIds[rowIdx];
+  if (!id) return;
+  if (!confirm(`Delete row ${rowIdx + 1}?`)) return;
+  db.deletes.add(id);
+  db.dirty.delete(id);
+  await flushDbDeletes();
+}
+
+async function flushDbDeletes() {
+  if (!db.deletes.size || !db.current) return;
+  const ids = [...db.deletes];
+  const res = await fetch(`/api/db/datasets/${db.current.id}/rows/delete`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ids })
+  });
+  if (!res.ok) { showToast('Delete failed', true); return; }
+  db.deletes.clear();
+  db.current.row_count = Math.max(0, db.current.row_count - ids.length);
+  db.pageCache.clear();
+  await fetchDbPage(state.page);
+  showToast('Deleted');
+}
+
+// ── Save / sync dirty ─────────────────────────────────────────────────────────
+async function saveDbDirty() {
+  if (!db.current) return;
+  if (!db.dirty.size && !db.deletes.size) { setSaveState('saved'); return; }
+  setSaveState('saving');
+
+  if (db.dirty.size) {
+    const payload = [...db.dirty.entries()].map(([id, { position, data }]) => ({ id, position, data }));
+    const res = await fetch(`/api/db/datasets/${db.current.id}/rows/save`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rows: payload })
+    });
+    if (res.ok) {
+      db.dirty.clear();
+      $('db-unsaved').classList.remove('show');
+      showToast(`Synced ${payload.length} row(s)`);
+    } else {
+      showToast('Sync failed', true);
+    }
+  }
+  if (db.deletes.size) await flushDbDeletes();
+  setSaveState('saved');
+}
+
+// Hook Ctrl+S into DB save when in DB mode
+document.addEventListener('keydown', e => {
+  if (db.mode && (e.ctrlKey || e.metaKey) && e.key === 's') {
+    e.preventDefault();
+    saveDbDirty();
+  }
+});
+
+// ── Override cell blur + delete in DB mode ────────────────────────────────────
+// Monkey-patch the existing handlers to check db.mode
+const _origOnCellBlur = onCellBlur;
+function onCellBlur(e) {
+  if (db.mode) { onCellBlurDb(e); return; }
+  _origOnCellBlur(e);
+}
+
+const _origOnDeleteRow = onDeleteRow;
+async function onDeleteRow(e) {
+  if (db.mode) { await deleteDbRow(parseInt(e.target.dataset.row)); return; }
+  await _origOnDeleteRow(e);
+}
+
+// ── New dataset ───────────────────────────────────────────────────────────────
+$('new-dataset-btn').addEventListener('click', async () => {
+  const name = prompt('Dataset name:');
+  if (!name?.trim()) return;
+  const res = await fetch('/api/db/datasets', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: name.trim(), headers: [] })
+  });
+  if (!res.ok) { showToast('Create failed', true); return; }
+  const { dataset } = await res.json();
+  db.datasets.unshift(dataset);
+  renderDatasetSelect();
+  $('dataset-select').value = dataset.id;
+  openHdrModal(dataset, true);
+});
+
+// ── Export ────────────────────────────────────────────────────────────────────
+$('export-btn').addEventListener('click', () => {
+  if (!db.current) return;
+  window.location.href = `/api/db/datasets/${db.current.id}/export`;
+});
+
+// ── Header config modal ───────────────────────────────────────────────────────
+let _hdrCallback = null;
+
+function openHdrModal(ds, required = false) {
+  $('hdr-modal-title').textContent = required
+    ? 'Configure Columns — required before viewing data'
+    : `Edit Columns — ${ds.name}`;
+  $('hdr-cancel-btn').style.display = required ? 'none' : '';
+  $('hdr-list').innerHTML = '';
+  const hdrs = ds.headers?.length ? [...ds.headers] : [''];
+  hdrs.forEach(h => addHdrRow(h));
+  $('hdr-backdrop').classList.add('open');
+  _hdrCallback = async (newHeaders) => {
+    const res = await fetch(`/api/db/datasets/${ds.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ headers: newHeaders })
+    });
+    if (!res.ok) { showToast('Save failed', true); return; }
+    ds.headers = newHeaders;
+    const updated = db.datasets.find(d => d.id === ds.id);
+    if (updated) updated.headers = newHeaders;
+    showToast('Columns saved');
+    if (required) await loadDbDataset(ds);
+  };
+}
+
+function addHdrRow(val = '') {
+  const row = document.createElement('div');
+  row.className = 'hdr-row';
+  row.innerHTML = `<input type="text" placeholder="Column name" value="${esc(val)}"><button title="Remove">✕</button>`;
+  row.querySelector('button').addEventListener('click', () => row.remove());
+  $('hdr-list').appendChild(row);
+  row.querySelector('input').focus();
+}
+
+$('hdr-add-btn').addEventListener('click', () => addHdrRow());
+$('hdr-cancel-btn').addEventListener('click', () => $('hdr-backdrop').classList.remove('open'));
+$('hdr-save-btn').addEventListener('click', async () => {
+  const inputs = [...$('hdr-list').querySelectorAll('input')];
+  const headers = inputs.map(i => i.value.trim()).filter(Boolean);
+  if (!headers.length) { showToast('Add at least one column', true); return; }
+  $('hdr-backdrop').classList.remove('open');
+  if (_hdrCallback) await _hdrCallback(headers);
+});
+
+// ── Import modal ──────────────────────────────────────────────────────────────
+let _importParsed = { headers: [], rows: [] };
+
+function openImportModal() {
+  if (!db.current) { showToast('Select a dataset first', true); return; }
+  $('drop-zone').innerHTML = '<div style="font-size:2rem">📂</div><strong>Drop a TSV file here</strong><p>or click to browse</p><input type="file" id="import-file-input" accept=".tsv,.txt,.csv" style="display:none">';
+  $('import-options').style.display = 'none';
+  $('col-map-wrap').style.display = 'none';
+  $('import-progress-bar').classList.remove('show');
+  $('import-progress-fill').style.width = '0%';
+  $('import-do-btn').disabled = true;
+  $('import-status').textContent = 'Select a file to begin.';
+  $('import-backdrop').classList.add('open');
+  rewireDropZone();
+}
+
+function rewireDropZone() {
+  const dz = $('drop-zone');
+  dz.addEventListener('click', () => dz.querySelector('input')?.click());
+  dz.addEventListener('dragover', e => { e.preventDefault(); dz.classList.add('drag-over'); });
+  dz.addEventListener('dragleave', () => dz.classList.remove('drag-over'));
+  dz.addEventListener('drop', e => {
+    e.preventDefault(); dz.classList.remove('drag-over');
+    const f = e.dataTransfer.files[0];
+    if (f) handleImportFile(f);
+  });
+  const fi = dz.querySelector('input');
+  if (fi) fi.addEventListener('change', e => { if (e.target.files[0]) handleImportFile(e.target.files[0]); });
+}
+
+async function handleImportFile(file) {
+  $('import-file-name').textContent = file.name;
+  const text  = await file.text();
+  const lines = text.split('\n').map(l => l.trimEnd()).filter(l => l);
+  if (!lines.length) { $('import-status').textContent = 'File is empty.'; return; }
+
+  const allRows = lines.map(l => l.split('\t'));
+  _importParsed = { allRows };
+
+  $('import-options').style.display = 'flex';
+  renderColMapping(allRows);
+}
+
+function renderColMapping(allRows) {
+  const hasHeader = $('import-has-header').checked;
+  const fileHeaders = hasHeader ? allRows[0] : allRows[0].map((_, i) => `Column ${i + 1}`);
+  const sampleRows  = allRows.slice(hasHeader ? 1 : 0, hasHeader ? 6 : 5);
+  const dsHeaders   = db.current?.headers || [];
+
+  const tbody = $('col-map-body');
+  tbody.innerHTML = '';
+  fileHeaders.forEach((fh, ci) => {
+    const samples = sampleRows.map(r => r[ci] ?? '').filter(Boolean).slice(0, 5);
+    // Auto-match: if file header name == dataset header name
+    const autoMatch = dsHeaders.findIndex(h => h.toLowerCase() === fh.toLowerCase());
+
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td><strong>${esc(fh)}</strong></td>
+      <td class="sample-cell" title="${esc(samples.join(' | '))}">${esc(samples.join(', '))}</td>
+      <td>
+        <select class="col-map-select" data-file-col="${ci}">
+          <option value="">— Skip —</option>
+          ${dsHeaders.map((h, i) => `<option value="${esc(h)}" ${i === autoMatch ? 'selected' : ''}>${esc(h)}</option>`).join('')}
+        </select>
+      </td>`;
+    tbody.appendChild(tr);
+  });
+
+  $('col-map-wrap').style.display = '';
+  $('import-do-btn').disabled = false;
+  $('import-status').textContent = `${allRows.length - (hasHeader ? 1 : 0)} rows ready to import.`;
+}
+
+$('import-has-header').addEventListener('change', () => {
+  if (_importParsed.allRows) renderColMapping(_importParsed.allRows);
+});
+
+$('import-do-btn').addEventListener('click', async () => {
+  const { allRows } = _importParsed;
+  if (!allRows || !db.current) return;
+
+  const hasHeader = $('import-has-header').checked;
+  const dataRows  = allRows.slice(hasHeader ? 1 : 0);
+  const mapping   = [...$('col-map-body').querySelectorAll('.col-map-select')]
+    .map(s => ({ fileCol: parseInt(s.dataset.fileCol), dsCol: s.value }))
+    .filter(m => m.dsCol);
+
+  if (!mapping.length) { showToast('Map at least one column', true); return; }
+
+  const mapped = dataRows.map(row => Object.fromEntries(mapping.map(m => [m.dsCol, row[m.fileCol] ?? ''])));
+
+  $('import-do-btn').disabled = true;
+  $('import-progress-bar').classList.add('show');
+
+  const batchSize = 500;
+  let inserted = 0;
+  for (let i = 0; i < mapped.length; i += batchSize) {
+    const chunk = mapped.slice(i, i + batchSize);
+    const res = await fetch(`/api/db/datasets/${db.current.id}/import`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rows: chunk })
+    });
+    if (!res.ok) { showToast('Import failed at batch ' + i, true); break; }
+    inserted += chunk.length;
+    $('import-progress-fill').style.width = `${Math.round(inserted / mapped.length * 100)}%`;
+    $('import-status').textContent = `Importing… ${inserted.toLocaleString()} / ${mapped.length.toLocaleString()}`;
+  }
+
+  $('import-do-btn').disabled = false;
+  $('import-status').textContent = `✓ Imported ${inserted.toLocaleString()} rows.`;
+  db.current.row_count += inserted;
+  db.pageCache.clear();
+  renderDatasetSelect();
+  showToast(`Imported ${inserted.toLocaleString()} rows`);
+  await fetchDbPage(0);
+});
+
+$('import-btn').addEventListener('click', openImportModal);
+$('import-close').addEventListener('click', () => $('import-backdrop').classList.remove('open'));
+$('import-backdrop').addEventListener('click', e => { if (e.target === $('import-backdrop')) $('import-backdrop').classList.remove('open'); });
 
 // ── init ─────────────────────────────────────────────────────────────────────
 loadFiles();
