@@ -119,6 +119,41 @@ def build_dialect_map() -> tuple[dict[str, str], set[str]]:
 DIALECT_MAP, ILONGGO_VOCAB = build_dialect_map()
 
 
+# ── English grammar (LanguageTool) ───────────────────────────────────────────
+try:
+    import language_tool_python as _lt_mod
+    _EN_TOOL      = None   # lazy-init on first request
+    EN_GRAMMAR_OK = True
+except ImportError:
+    EN_GRAMMAR_OK = False
+    print("[warn] language_tool_python not installed — pip install language_tool_python")
+
+
+def _get_en_tool():
+    global _EN_TOOL
+    if _EN_TOOL is None:
+        _EN_TOOL = _lt_mod.LanguageTool('en-US')
+    return _EN_TOOL
+
+
+def en_grammar_check(text: str) -> list[dict]:
+    """Run LanguageTool on English text. Returns list of issue dicts."""
+    if not text.strip():
+        return []
+    tool = _get_en_tool()
+    issues = []
+    for m in tool.check(text):
+        issues.append({
+            "start":        m.offset,
+            "end":          m.offset + m.errorLength,
+            "message":      m.message,
+            "replacements": list(m.replacements)[:3],
+            "rule_id":      m.ruleId,
+            "category":     m.category,
+        })
+    return issues
+
+
 # ── grammar checker ───────────────────────────────────────────────────────────
 
 def load_grammar_phrases() -> list:
@@ -394,6 +429,25 @@ def api_grammar_batch():
     return jsonify({"corrections": results})
 
 
+@app.post("/api/en-grammar/batch")
+def api_en_grammar_batch():
+    """
+    Run LanguageTool English grammar check on a batch of rows.
+    Body: { rows: [{row: int, text: str}, ...] }
+    Returns { issues: [{row, issues:[{start,end,message,replacements,rule_id,category}]}] }
+    """
+    if not EN_GRAMMAR_OK:
+        return jsonify({"error": "language_tool_python not installed — pip install language_tool_python"}), 503
+    body = request.json or {}
+    rows = body.get("rows", [])
+    results = []
+    for item in rows:
+        issues = en_grammar_check(item.get("text", ""))
+        if issues:
+            results.append({"row": item["row"], "issues": issues})
+    return jsonify({"issues": results})
+
+
 @app.post("/api/clean")
 def api_clean():
     """
@@ -594,6 +648,15 @@ span.spell-err {
 #spell-sidebar-body { flex: 1; overflow-y: auto; min-width: 300px; }
 #spell-issue-list { padding: 8px; }
 #gram-correction-list { padding: 8px; }
+#en-gram-list { padding: 8px; }
+.en-card { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; transition: border-color .15s, background .15s; }
+.en-card:hover { border-color: #63b3ed; }
+.en-card.active { border-color: #63b3ed; background: rgba(99,179,237,.07); }
+.en-card .row-ref { font-size: 0.7rem; color: var(--muted); margin-bottom: 4px; }
+.en-card .en-msg { font-size: 0.82rem; color: var(--text); margin-bottom: 6px; line-height: 1.4; cursor: pointer; }
+.en-card .en-msg:hover { color: #63b3ed; }
+.en-card .en-orig { font-size: 0.82rem; color: var(--danger); text-decoration: line-through; margin-right: 4px; }
+.en-card .en-fix  { font-size: 0.82rem; color: var(--spell-fix); font-weight: 500; }
 .spell-card { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; transition: border-color .15s, background .15s; }
 .spell-card:hover { border-color: var(--spell-warn); }
 .spell-card.active { border-color: var(--spell-warn); background: rgba(246,173,85,.07); }
@@ -610,6 +673,15 @@ span.gram-err {
 }
 @keyframes gram-flash { 0%,100%{background:transparent;outline:none} 30%{background:rgba(246,173,85,.35);outline:2px solid #f6ad55;border-radius:2px} }
 span.gram-err.flash { animation: gram-flash .7s ease; }
+span.en-err {
+  text-decoration: underline wavy #63b3ed;
+  text-underline-offset: 3px;
+  cursor: help;
+  color: inherit;
+}
+@keyframes en-flash { 0%,100%{background:transparent;outline:none} 30%{background:rgba(99,179,237,.3);outline:2px solid #63b3ed;border-radius:2px} }
+span.en-err.flash { animation: en-flash .7s ease; }
+td.en-cell-issue { box-shadow: inset 3px 0 0 #63b3ed; }
 .spell-card .word-error { color: var(--danger); text-decoration: underline wavy var(--danger); text-underline-offset: 3px; }
 .spell-card .arrow { color: var(--muted); }
 .spell-card .word-fix { color: var(--spell-fix); font-weight: 500; }
@@ -793,6 +865,10 @@ td.find-match-active { background: rgba(108,99,255,.35) !important; outline: 2px
       <div id="gram-correction-list">
         <div id="gram-empty" style="padding:12px 16px;color:var(--muted);font-size:.82rem">No grammar fixes needed.</div>
       </div>
+      <div class="sidebar-section-title" style="color:#63b3ed">EN Grammar</div>
+      <div id="en-gram-list">
+        <div id="en-gram-empty" style="padding:12px 16px;color:var(--muted);font-size:.82rem">Run check to see EN issues.</div>
+      </div>
     </div>
   </div>
 </div>
@@ -829,6 +905,8 @@ let lastCheckedIdx = null;      // for shift-click range select (filtered index)
 let spellIssues       = [];   // [{row, col, issues:[{word,start,end,suggestion,type}]}]
 let gramCorrections   = [];   // [{row, col, original, corrected, diff}]
 let hilCol            = null;
+let enIssues          = [];   // [{row, col, issues:[{start,end,message,replacements,rule_id}]}]
+let enCol             = null;
 
 // ── file list ────────────────────────────────────────────────────────────────
 async function loadFiles() {
@@ -866,6 +944,8 @@ async function loadFile(path) {
   spellIssues     = [];
   gramCorrections = [];
   hilCol          = null;
+  enIssues        = [];
+  enCol           = null;
   $('spell-status').textContent    = 'Checking…';
   $('spell-issue-list').innerHTML  = '';
   $('gram-correction-list').innerHTML = '';
@@ -1329,55 +1409,81 @@ async function runSpellCheck() {
   if (!state.file) { showToast('Load a file first', true); return; }
 
   hilCol = state.headers.findIndex(h => h.toLowerCase().includes('hil'));
-  if (hilCol === -1) {
-    $('spell-status').textContent = 'No HIL column found in this file.';
-    $('spell-issue-list').innerHTML  = '<div id="spell-empty">No HIL column detected.</div>';
-    $('gram-correction-list').innerHTML = '<div id="gram-empty" style="padding:12px 16px;color:var(--muted);font-size:.82rem">—</div>';
-    return;
-  }
+  enCol  = state.headers.findIndex(h => /\ben\b/i.test(h) || h.toLowerCase() === 'english');
 
   $('run-check-btn').disabled      = true;
   $('spell-status').textContent    = 'Checking…';
   $('spell-issue-list').innerHTML  = '';
   $('gram-correction-list').innerHTML = '';
+  $('en-gram-list').innerHTML      = '<div style="padding:12px 16px;color:var(--muted);font-size:.82rem">Checking EN…</div>';
 
-  const rows = pageSlice().map(({ r, i }) => ({ row: i, text: r[hilCol] || '' }));
-  const body = JSON.stringify({ rows });
-  const opts = { method: 'POST', headers: { 'Content-Type': 'application/json' }, body };
+  const fetches = [];
 
-  // Run both checks in parallel
-  const [spellRes, gramRes] = await Promise.all([
-    fetch('/api/spellcheck/batch', opts),
-    fetch('/api/grammar/batch',    opts),
-  ]);
-  $('run-check-btn').disabled = false;
-
-  if (!spellRes.ok || !gramRes.ok) {
-    showToast('Check failed', true);
-    $('spell-status').textContent = 'Check failed.';
-    return;
+  if (hilCol !== -1) {
+    const rows = pageSlice().map(({ r, i }) => ({ row: i, text: r[hilCol] || '' }));
+    const body = JSON.stringify({ rows });
+    const opts = { method: 'POST', headers: { 'Content-Type': 'application/json' }, body };
+    fetches.push(fetch('/api/spellcheck/batch', opts));
+    fetches.push(fetch('/api/grammar/batch',    opts));
+  } else {
+    fetches.push(Promise.resolve(null));
+    fetches.push(Promise.resolve(null));
+    $('spell-issue-list').innerHTML = '<div style="padding:12px 8px;color:var(--muted);font-size:.82rem">No HIL column.</div>';
+    $('gram-correction-list').innerHTML = '<div style="padding:12px 8px;color:var(--muted);font-size:.82rem">—</div>';
   }
 
-  const [spellData, gramData] = await Promise.all([spellRes.json(), gramRes.json()]);
+  if (enCol !== -1) {
+    const enRows = pageSlice().map(({ r, i }) => ({ row: i, text: r[enCol] || '' }));
+    fetches.push(fetch('/api/en-grammar/batch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rows: enRows }),
+    }));
+  } else {
+    fetches.push(Promise.resolve(null));
+    $('en-gram-list').innerHTML = '<div style="padding:12px 16px;color:var(--muted);font-size:.82rem">No EN column found.</div>';
+  }
 
-  spellIssues     = spellData.issues.map(ri => ({ ...ri, col: hilCol }));
-  gramCorrections = gramData.corrections.map(c => ({ ...c, col: hilCol }));
+  const [spellRes, gramRes, enRes] = await Promise.all(fetches);
+  $('run-check-btn').disabled = false;
+
+  // HIL spell
+  if (spellRes && spellRes.ok) {
+    const d = await spellRes.json();
+    spellIssues = d.issues.map(ri => ({ ...ri, col: hilCol }));
+  }
+  // HIL grammar
+  if (gramRes && gramRes.ok) {
+    const d = await gramRes.json();
+    gramCorrections = d.corrections.map(c => ({ ...c, col: hilCol }));
+  }
+  // EN grammar
+  if (enRes) {
+    if (enRes.ok) {
+      const d = await enRes.json();
+      enIssues = d.issues.map(ri => ({ ...ri, col: enCol }));
+    } else {
+      const err = await enRes.json().catch(() => ({}));
+      $('en-gram-list').innerHTML = `<div style="padding:12px 16px;color:var(--danger);font-size:.82rem">${esc(err.error || 'EN check failed')}</div>`;
+    }
+  }
 
   renderSidebarStatus();
-  renderSpellIssues();
-  renderGrammarCorrections();
-  applySpellHighlights();
+  if (hilCol !== -1) { renderSpellIssues(); renderGrammarCorrections(); applySpellHighlights(); }
+  if (enCol  !== -1 && enRes?.ok) { renderEnIssues(); applyEnHighlights(); }
 }
 
 function renderSidebarStatus() {
-  const sc = spellIssues.reduce((s, r) => s + r.issues.length, 0);
-  const gc = gramCorrections.length;
-  if (sc === 0 && gc === 0) {
-    $('spell-status').textContent = 'No issues — HIL column looks good!';
+  const sc  = spellIssues.reduce((s, r) => s + r.issues.length, 0);
+  const gc  = gramCorrections.length;
+  const enc = enIssues.reduce((s, r) => s + r.issues.length, 0);
+  if (sc === 0 && gc === 0 && enc === 0) {
+    $('spell-status').textContent = 'No issues found!';
   } else {
     const parts = [];
-    if (sc) parts.push(`${sc} spelling`);
-    if (gc) parts.push(`${gc} grammar fix${gc !== 1 ? 'es' : ''}`);
+    if (sc)  parts.push(`${sc} HIL spell`);
+    if (gc)  parts.push(`${gc} HIL grammar`);
+    if (enc) parts.push(`${enc} EN issue${enc !== 1 ? 's' : ''}`);
     $('spell-status').textContent = parts.join(' · ');
   }
 }
@@ -1560,6 +1666,153 @@ function onRejectGrammar(e) {
   }
   renderSidebarStatus();
   renderGrammarCorrections();
+}
+
+// ── EN grammar rendering ──────────────────────────────────────────────────────
+
+function renderEnIssues() {
+  const list = $('en-gram-list');
+  const total = enIssues.reduce((s, r) => s + r.issues.length, 0);
+  if (total === 0) {
+    list.innerHTML = '<div style="padding:12px 16px;text-align:center;color:var(--spell-fix);font-size:.82rem">EN looks good!</div>';
+    return;
+  }
+  list.innerHTML = '';
+  enIssues.forEach((rowIssue, ri) => {
+    rowIssue.issues.forEach((issue, ii) => {
+      const orig = esc(issue.start < issue.end
+        ? (state.rows[rowIssue.row][rowIssue.col] || '').slice(issue.start, issue.end)
+        : '…');
+      const firstFix = issue.replacements[0] ? esc(issue.replacements[0]) : '';
+      const card = document.createElement('div');
+      card.className = 'en-card';
+      card.dataset.ri = ri; card.dataset.ii = ii;
+      card.innerHTML = `
+        <div class="row-ref">Row ${rowIssue.row + 1} &mdash; EN column</div>
+        <div class="en-msg" data-ri="${ri}" data-ii="${ii}" title="Click to jump">${esc(issue.message)}</div>
+        ${firstFix ? `<div style="display:flex;align-items:center;gap:4px;font-size:.82rem;margin-bottom:6px">
+          <span class="en-orig">${orig}</span>
+          <span style="color:var(--muted)">→</span>
+          <span class="en-fix">${firstFix}</span>
+        </div>` : ''}
+        <div class="card-actions">
+          ${firstFix ? `<button class="accept-btn" data-ri="${ri}" data-ii="${ii}">Accept</button>` : ''}
+          <button class="reject-btn" data-ri="${ri}" data-ii="${ii}">Ignore</button>
+        </div>`;
+      list.appendChild(card);
+    });
+  });
+
+  list.querySelectorAll('.en-msg').forEach(el =>
+    el.addEventListener('click', e =>
+      scrollToEnIssue(parseInt(e.currentTarget.dataset.ri), parseInt(e.currentTarget.dataset.ii))
+    )
+  );
+  list.querySelectorAll('.accept-btn').forEach(btn => btn.addEventListener('click', onAcceptEnIssue));
+  list.querySelectorAll('.reject-btn').forEach(btn => btn.addEventListener('click', onRejectEnIssue));
+}
+
+function applyEnHighlights() {
+  if (enCol === null) return;
+  const enMap = new Map(enIssues.map(ri => [ri.row, ri.issues]));
+  document.querySelectorAll(`.cell-editable[data-col="${enCol}"]`).forEach(td => {
+    if (document.activeElement === td) return;
+    const row    = parseInt(td.dataset.row);
+    const issues = enMap.get(row);
+    if (!issues?.length) return;
+    const text = state.rows[row][enCol] || '';
+    const ranges = issues.map(iss => ({
+      start: iss.start, end: iss.end,
+      cls: 'en-err', title: esc(iss.message)
+    })).sort((a, b) => a.start - b.start);
+    let html = '', pos = 0;
+    for (const r of ranges) {
+      if (r.start < pos) continue;
+      html += esc(text.slice(pos, r.start));
+      html += `<span class="${r.cls}" title="${r.title}">${esc(text.slice(r.start, r.end))}</span>`;
+      pos = r.end;
+    }
+    html += esc(text.slice(pos));
+    td.innerHTML = html;
+    td.classList.add('en-cell-issue');
+  });
+}
+
+function scrollToEnIssue(ri, ii) {
+  const rowIssue = enIssues[ri];
+  if (!rowIssue) return;
+
+  $('en-gram-list').querySelectorAll('.en-card').forEach(c => c.classList.remove('active'));
+  const card = $('en-gram-list').querySelector(`.en-card[data-ri="${ri}"][data-ii="${ii}"]`);
+  if (card) card.classList.add('active');
+
+  const inPage = pageSlice().some(({ i }) => i === rowIssue.row);
+  if (!inPage) {
+    const filtIdx = state.filtered.findIndex(f => f.i === rowIssue.row);
+    if (filtIdx !== -1) state.page = Math.floor(filtIdx / state.pageSize);
+    render();
+    applyEnHighlights();
+  }
+  const tr = document.querySelector(`tr[data-row="${rowIssue.row}"]`);
+  if (tr) tr.scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+  const td = document.querySelector(`td.cell-editable[data-row="${rowIssue.row}"][data-col="${rowIssue.col}"]`);
+  if (td) {
+    td.querySelectorAll('span.en-err').forEach(span => {
+      span.classList.remove('flash'); void span.offsetWidth; span.classList.add('flash');
+      setTimeout(() => span.classList.remove('flash'), 750);
+    });
+  }
+}
+
+async function onAcceptEnIssue(e) {
+  const ri       = parseInt(e.target.dataset.ri);
+  const ii       = parseInt(e.target.dataset.ii);
+  const rowIssue = enIssues[ri];
+  const issue    = rowIssue?.issues[ii];
+  if (!issue || !issue.replacements[0]) return;
+
+  const text   = state.rows[rowIssue.row][rowIssue.col] || '';
+  const newVal = text.slice(0, issue.start) + issue.replacements[0] + text.slice(issue.end);
+
+  const res = await fetch('/api/tsv/cell', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path: state.file, row: rowIssue.row, col: rowIssue.col, value: newVal })
+  });
+  if (!res.ok) { showToast('Save failed', true); return; }
+
+  state.rows[rowIssue.row][rowIssue.col] = newVal;
+  const tr = document.querySelector(`tr[data-row="${rowIssue.row}"]`);
+  if (tr) tr.classList.add('changed');
+
+  // Remove this specific issue
+  rowIssue.issues.splice(ii, 1);
+  if (rowIssue.issues.length === 0) {
+    enIssues.splice(ri, 1);
+    const td = document.querySelector(`td.cell-editable[data-row="${rowIssue.row}"][data-col="${rowIssue.col}"]`);
+    if (td) { td.textContent = newVal; td.classList.remove('en-cell-issue'); }
+  } else {
+    applyEnHighlights();
+  }
+  showToast('EN fix applied');
+  renderSidebarStatus();
+  renderEnIssues();
+}
+
+function onRejectEnIssue(e) {
+  const ri       = parseInt(e.target.dataset.ri);
+  const ii       = parseInt(e.target.dataset.ii);
+  const rowIssue = enIssues[ri];
+  if (!rowIssue) return;
+  rowIssue.issues.splice(ii, 1);
+  if (rowIssue.issues.length === 0) {
+    enIssues.splice(ri, 1);
+    const td = document.querySelector(`td.cell-editable[data-row="${rowIssue.row}"][data-col="${rowIssue.col}"]`);
+    if (td) { td.textContent = state.rows[rowIssue.row][rowIssue.col]; td.classList.remove('en-cell-issue'); }
+  }
+  renderSidebarStatus();
+  renderEnIssues();
 }
 
 function scrollToIssue(ri, ii) {
