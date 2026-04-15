@@ -25,6 +25,6 @@ showIgnoredInTree: false
 # Whether to show only default ignored files in the directory tree while still respecting gitignore
 showDefaultIgnoredInTree: false
 # Previously selected files (when using the -s or --save flag previously)
-previousFiles: grammar-checker/__init__.py,grammar-checker/engine.py,grammar-checker/rules.py,grammar-checker/tokenizer.py
+previousFiles: railway.toml,requirements.txt,app.py
 # Excluded directories (when using the -s or --save flag previously or edited in UI)
 excludeDirs: 

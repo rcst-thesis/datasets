@@ -4,3 +4,4 @@ python-dotenv>=1.0
 supabase>=2.0
 language_tool_python>=2.7
 transliterate>=1.10.2
+pandas

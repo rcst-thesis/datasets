@@ -1,0 +1,7 @@
+[build]
+  builder = "NIXPACKS"
+  buildCommand = "unset JAVA_TOOL_OPTIONS && apt-get update && apt-get install -y openjdk-17-jre-headless"
+
+[deploy]
+  # Set Java heap to 512MB max (adjust based on Railway plan)
+  startCommand = "export JAVA_TOOL_OPTIONS='-Xms256m -Xmx512m'; gunicorn --bind 0.0.0.0:$PORT app:app --timeout 300 --worker-class gthread --threads 4 --workers 1"

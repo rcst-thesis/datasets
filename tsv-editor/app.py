@@ -221,36 +221,87 @@ CUSTOM_DICT: set[str] = load_custom_dict()
 # ── English grammar (LanguageTool) ───────────────────────────────────────────
 try:
     import language_tool_python as _lt_mod
-    _EN_TOOL      = None   # lazy-init on first request
+    import os
+    import subprocess
+    
+    # Force Java memory limits before importing
+    os.environ.setdefault('JAVA_TOOL_OPTIONS', '-Xms256m -Xmx512m')
+    
+    _EN_TOOL = None
     EN_GRAMMAR_OK = True
+    
+    # Verify Java is available with memory constraints
+    try:
+        result = subprocess.run(
+            ["java", "-Xmx512m", "-version"], 
+            capture_output=True, 
+            text=True, 
+            timeout=10
+        )
+        print("[info] Java available with 512MB max heap")
+    except Exception as e:
+        print(f"[warn] Java check failed: {e}")
+        EN_GRAMMAR_OK = False
+        
 except ImportError:
     EN_GRAMMAR_OK = False
-    print("[warn] language_tool_python not installed — pip install language_tool_python")
-
+    print("[warn] language_tool_python not installed")
 
 def _get_en_tool():
-    global _EN_TOOL
-    if _EN_TOOL is None:
-        _EN_TOOL = _lt_mod.LanguageTool('en-US')
+    global _EN_TOOL, EN_GRAMMAR_OK
+    if _EN_TOOL is None and EN_GRAMMAR_OK:
+        try:
+            # Use remote server if available, else local with constraints
+            _EN_TOOL = _lt_mod.LanguageTool(
+                'en-US',
+                remote_server=None,  # Force local
+            )
+            print("[info] LanguageTool initialized")
+        except Exception as e:
+            print(f"[error] LanguageTool init failed: {e}")
+            EN_GRAMMAR_OK = False
     return _EN_TOOL
-
 
 def en_grammar_check(text: str) -> list[dict]:
     """Run LanguageTool on English text. Returns list of issue dicts."""
-    if not text.strip():
+    if not text.strip() or not EN_GRAMMAR_OK:
         return []
+    
     tool = _get_en_tool()
-    issues = []
-    for m in tool.check(text):
-        issues.append({
-            "start":        m.offset,
-            "end":          m.offset + m.error_length,
-            "message":      m.message,
-            "replacements": list(m.replacements)[:3],
-            "rule_id":      m.rule_id,
-            "category":     m.category,
-        })
-    return issues
+    if tool is None:
+        return []
+    
+    try:
+        # Process in smaller chunks to avoid memory spikes
+        max_chunk = 10000  # characters per chunk
+        if len(text) > max_chunk:
+            chunks = [text[i:i+max_chunk] for i in range(0, len(text), max_chunk)]
+            all_issues = []
+            offset = 0
+            for chunk in chunks:
+                for m in tool.check(chunk):
+                    all_issues.append({
+                        "start": m.offset + offset,
+                        "end": m.offset + m.error_length + offset,
+                        "message": m.message,
+                        "replacements": list(m.replacements)[:3],
+                        "rule_id": m.rule_id,
+                        "category": m.category,
+                    })
+                offset += len(chunk)
+            return all_issues
+        else:
+            return [{
+                "start": m.offset,
+                "end": m.offset + m.error_length,
+                "message": m.message,
+                "replacements": list(m.replacements)[:3],
+                "rule_id": m.rule_id,
+                "category": m.category,
+            } for m in tool.check(text)]
+    except Exception as e:
+        print(f"[error] LanguageTool check failed: {e}")
+        return []
 
 
 # ── grammar checker ───────────────────────────────────────────────────────────
@@ -927,7 +978,43 @@ def api_db_export(ds_id):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-
+@app.post("/api/en-grammar/batch-stream")
+def api_en_grammar_batch_stream():
+    """
+    Memory-efficient batch processing for large datasets.
+    Processes in chunks of 50 rows to keep memory low.
+    """
+    if not EN_GRAMMAR_OK:
+        return jsonify({"error": "LanguageTool not available"}), 503
+    
+    body = request.json or {}
+    rows = body.get("rows", [])
+    chunk_size = body.get("chunk_size", 50)  # Process 50 at a time
+    
+    results = []
+    tool = _get_en_tool()
+    if tool is None:
+        return jsonify({"issues": [], "error": "LT init failed"}), 503
+    
+    # Process in chunks to allow GC between batches
+    for i in range(0, len(rows), chunk_size):
+        chunk = rows[i:i + chunk_size]
+        for item in chunk:
+            try:
+                issues = en_grammar_check(item.get("text", ""))
+                if issues:
+                    results.append({"row": item["row"], "issues": issues})
+            except Exception as e:
+                print(f"[error] Row {item.get('row')}: {e}")
+                continue
+        
+        # Force cleanup every chunk
+        if i % (chunk_size * 2) == 0:
+            import gc
+            gc.collect()
+    
+    return jsonify({"issues": results, "processed": len(rows)})
+    
 # ── HTML / CSS / JS (single-file SPA) ────────────────────────────────────────
 
 HTML_TEMPLATE = r"""<!doctype html>
