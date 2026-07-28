@@ -16,7 +16,7 @@ def parquet_to_tsv(input_path: str, output_path: str = None):
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python converter.py <input.parquet> [output.tsv]")
+        print("Usage: python scripts/converter.py <input.parquet> [output.tsv]")
         sys.exit(1)
     
     input_path = sys.argv[1]

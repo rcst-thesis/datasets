@@ -26,7 +26,7 @@ def trim_csv(input_path, output_path=None):
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python trim_csv.py <input.csv> [output.csv]")
+        print("Usage: python scripts/trim_csv.py <input.csv> [output.csv]")
         print("  If output.csv is omitted, the input file is overwritten.")
         sys.exit(1)
 

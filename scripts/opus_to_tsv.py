@@ -5,13 +5,13 @@ opus_to_tsv.py — Convert OPUS corpus files to a TSV test set.
 Supported input formats
 -----------------------
   paired txt   Two aligned .txt files (one sentence per line)
-               python opus_to_tsv.py -s src.txt -t tgt.txt -o out.tsv
+               python scripts/opus_to_tsv.py -s src.txt -t tgt.txt -o out.tsv
 
   TMX          Translation Memory eXchange (.tmx)
-               python opus_to_tsv.py --tmx corpus.tmx -o out.tsv --src-lang en --tgt-lang hil
+               python scripts/opus_to_tsv.py --tmx corpus.tmx -o out.tsv --src-lang en --tgt-lang hil
 
   Moses XML    OPUS-style .xml corpus files (requires both src + tgt)
-               python opus_to_tsv.py --xml-src en.xml --xml-tgt hil.xml -o out.tsv
+               python scripts/opus_to_tsv.py --xml-src en.xml --xml-tgt hil.xml -o out.tsv
 
 Options
 -------

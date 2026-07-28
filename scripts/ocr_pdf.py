@@ -8,8 +8,8 @@ read them. Processing one page at a time keeps memory flat regardless of
 how large the PDF is.
 
 Usage:
-    python ocr_pdf.py input.pdf output.txt
-    python ocr_pdf.py input.pdf output.txt --dpi 200 --lang eng
+    python scripts/ocr_pdf.py input.pdf output.txt
+    python scripts/ocr_pdf.py input.pdf output.txt --dpi 200 --lang eng
 """
 
 import argparse

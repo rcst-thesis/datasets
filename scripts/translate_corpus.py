@@ -9,9 +9,9 @@ pip install transformers sentencepiece torch tqdm
 
 Usage
 -----
-python translate_corpus.py input.txt output.hil.txt
-python translate_corpus.py input.txt output.hil.txt --batch-size 64 --device cuda
-python translate_corpus.py input.txt output.hil.txt --resume   # skip already-done lines
+python scripts/translate_corpus.py input.txt output.hil.txt
+python scripts/translate_corpus.py input.txt output.hil.txt --batch-size 64 --device cuda
+python scripts/translate_corpus.py input.txt output.hil.txt --resume
 """
 
 import argparse

@@ -3,18 +3,18 @@
 scrape_bombo.py — Scrape Hiligaynon text from Bombo Radyo Iloilo.
 
 Site    : https://iloilo.bomboradyo.com
-Output  : data/bombo_raw.txt   — one sentence per line (monolingual)
-          data/bombo.tsv       — src TAB tgt  (tgt empty; no EN parallel)
-          data/bombo_log.jsonl — per-article metadata
+Output  : data/raw/bombo/bombo_raw.txt   — one sentence per line (monolingual)
+          data/raw/bombo/bombo.tsv       — src TAB tgt  (tgt empty; no EN parallel)
+          data/raw/bombo/bombo_log.jsonl — per-article metadata
 
 Usage
 -----
     pip install requests beautifulsoup4 langdetect tqdm
 
-    python scrape_bombo.py
-    python scrape_bombo.py --categories top-stories balita-espesyal
-    python scrape_bombo.py --max-articles 200 --delay 2.0
-    python scrape_bombo.py --resume
+    python scripts/scrape_bombo.py
+    python scripts/scrape_bombo.py --categories top-stories balita-espesyal
+    python scripts/scrape_bombo.py --max-articles 200 --delay 2.0
+    python scripts/scrape_bombo.py --resume
 """
 
 from __future__ import annotations
@@ -71,7 +71,7 @@ NON_ARTICLE_PATTERNS = re.compile(
     r"/(category|tag|author|page|search|\?)"
 )
 
-OUT_DIR     = Path("data")
+OUT_DIR     = Path("data/raw/bombo")
 MIN_WORDS   = 5
 MIN_CHARS   = 40
 MAX_CHARS   = 600

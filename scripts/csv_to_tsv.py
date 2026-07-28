@@ -2,11 +2,11 @@
 """
 CSV to TSV Converter CLI
 
-Usage: python csv_to_tsv.py <input.csv> [output.tsv]
+Usage: python scripts/csv_to_tsv.py <input.csv> [output.tsv]
 
 Examples:
-    python csv_to_tsv.py data.csv           # Creates data.tsv
-    python csv_to_tsv.py data.csv out.tsv   # Creates out.tsv
+    python scripts/csv_to_tsv.py data.csv
+    python scripts/csv_to_tsv.py data.csv out.tsv
 """
 
 import csv

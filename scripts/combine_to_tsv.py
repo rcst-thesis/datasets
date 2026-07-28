@@ -6,13 +6,13 @@ Output: combined.tsv with columns: en  hil
 
 import csv
 
-# EN_FILE = "corpus_out/en_clean.txt"
-# HIL_FILE = "corpus_out/hiligaynon.txt"
-# OUT_FILE = "corpus_out/combined-set-1.tsv"
+# EN_FILE = "data/processed/pretraining/en_clean.txt"
+# HIL_FILE = "data/processed/pretraining/hiligaynon.txt"
+# OUT_FILE = "data/processed/pretraining/combined-set-1.tsv"
 
-EN_FILE = "corpus_out/hil_clean.txt"
-HIL_FILE = "corpus_out/english.txt"
-OUT_FILE = "corpus_out/combined-set-2.tsv"
+EN_FILE = "data/processed/pretraining/hil_clean.txt"
+HIL_FILE = "data/processed/pretraining/english.txt"
+OUT_FILE = "data/processed/pretraining/combined-set-2.tsv"
 
 
 def combine(en_path: str, hil_path: str, out_path: str) -> None:

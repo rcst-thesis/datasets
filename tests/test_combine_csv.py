@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from combine_csv import combine_csv
+from scripts.combine_csv import combine_csv
 
 
 class CombineCsvTest(unittest.TestCase):
