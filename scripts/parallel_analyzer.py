@@ -784,18 +784,18 @@ def build_parser():
         epilog="""
 Examples:
   # Parallel CSV/TSV
-  python parallel_analyzer.py data.tsv
-  python parallel_analyzer.py data.tsv --src-col en --tgt-col tl
+  python scripts/parallel_analyzer.py data.tsv
+  python scripts/parallel_analyzer.py data.tsv --src-col en --tgt-col tl
 
   # Two parallel corpus files
-  python parallel_analyzer.py --src corpus_en.txt --tgt corpus_tl.txt
+  python scripts/parallel_analyzer.py --src corpus_en.txt --tgt corpus_tl.txt
 
   # Monolingual file (single --src, no --tgt)
-  python parallel_analyzer.py --src hil.txt
-  python parallel_analyzer.py --src data/hil_raw.txt --min-tokens 5
+  python scripts/parallel_analyzer.py --src hil.txt
+  python scripts/parallel_analyzer.py --src data/raw/bombo/bombo_raw.txt --min-tokens 5
 
   # Full parallel analysis with export
-  python parallel_analyzer.py data.tsv --samples 10 --top-tokens --export flagged.tsv
+  python scripts/parallel_analyzer.py data.tsv --samples 10 --top-tokens --export flagged.tsv
 """,
     )
 
@@ -859,8 +859,8 @@ def main():
             sys.exit(red(
                 "Error: for a single .txt file use --src (monolingual) or "
                 "--src + --tgt (parallel).\n"
-                "  Monolingual: python parallel_analyzer.py --src hil.txt\n"
-                "  Parallel:    python parallel_analyzer.py --src en.txt --tgt tl.txt"
+                "  Monolingual: python scripts/parallel_analyzer.py --src hil.txt\n"
+                "  Parallel:    python scripts/parallel_analyzer.py --src en.txt --tgt tl.txt"
             ))
         print(f"\n{bold('Mode')}     : {cyan('parallel (CSV/TSV)')}")
         print(f"{bold('Loading')} : {cyan(path)} …")

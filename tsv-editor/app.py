@@ -1,6 +1,6 @@
 """
 TSV Editor — Flask web app for viewing and editing parallel-corpus TSV files.
-Run:  python tsv_editor.py
+Run:  python tsv-editor/app.py
 Then open http://localhost:5000
 """
 
@@ -11,13 +11,17 @@ import unicodedata
 from pathlib import Path
 from flask import Flask, jsonify, render_template_string, request
 
-BASE_DIR  = Path(__file__).parent
-SPELL_DIR = BASE_DIR / "spell-checker"
+APP_DIR = Path(__file__).parent
+REPO_DIR = APP_DIR.parent
+BASE_DIR = Path(
+    os.environ.get("TSV_DATA_DIR", REPO_DIR if (REPO_DIR / "data").is_dir() else APP_DIR)
+)
+SPELL_DIR = APP_DIR / "spell-checker"
 
 # Load .env if present (optional dep — silently skipped if not installed)
 try:
     from dotenv import load_dotenv
-    load_dotenv(BASE_DIR / ".env")
+    load_dotenv(APP_DIR / ".env")
 except ImportError:
     pass
 
@@ -87,7 +91,7 @@ def _db_err():
 
 # ── load cleaner ──────────────────────────────────────────────────────────────
 import importlib.util as _ilu
-_clean_spec = _ilu.spec_from_file_location("clean", BASE_DIR / "clean.py")
+_clean_spec = _ilu.spec_from_file_location("clean", APP_DIR / "clean.py")
 _clean_mod  = _ilu.module_from_spec(_clean_spec)
 try:
     _clean_spec.loader.exec_module(_clean_mod)

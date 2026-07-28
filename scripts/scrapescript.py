@@ -13,9 +13,9 @@ Output files (auto-created):
 
 Usage:
   pip install requests beautifulsoup4 tqdm
-  python hil_en_scraper.py                   # full Bible (~31 000 verses)
-  python hil_en_scraper.py --books MAT JHN   # specific books only
-  python hil_en_scraper.py --resume          # skip already-scraped books
+  python scripts/scrapescript.py                   # full Bible (~31 000 verses)
+  python scripts/scrapescript.py --books MAT JHN   # specific books only
+  python scripts/scrapescript.py --resume          # skip already-scraped books
 """
 
 import argparse
@@ -37,7 +37,7 @@ BASE_URL  = "https://www.bible.com/bible"
 HIL_VER   = 10     # Ang Pulong Sang Dios (Hiligaynon)
 EN_VER    = 1      # KJV English
 DELAY     = 1.2    # seconds between requests (be polite)
-OUT_DIR   = Path("hiligaynon_corpus")
+OUT_DIR   = Path("data/raw/bible")
 CACHE_DIR = OUT_DIR / ".cache"
 
 HEADERS = {

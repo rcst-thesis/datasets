@@ -4,7 +4,7 @@ import json
 import os
 from datetime import datetime
 
-def scrape_and_save(url, output_dir="./data"):
+def scrape_and_save(url, output_dir="data/raw/web"):
     # Create output directory if it doesn't exist
     os.makedirs(output_dir, exist_ok=True)
     

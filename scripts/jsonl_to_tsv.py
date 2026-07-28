@@ -7,9 +7,9 @@ Each line in the JSONL must have:
   "trgs" — list of target strings (first one is used by default)
 
 Usage:
-    python jsonl_to_tsv.py input.jsonl
-    python jsonl_to_tsv.py input.jsonl -o output.tsv
-    python jsonl_to_tsv.py input.jsonl --all-trgs   # one row per target
+    python scripts/jsonl_to_tsv.py input.jsonl
+    python scripts/jsonl_to_tsv.py input.jsonl -o output.tsv
+    python scripts/jsonl_to_tsv.py input.jsonl --all-trgs
 """
 
 import argparse

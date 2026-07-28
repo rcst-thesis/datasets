@@ -187,8 +187,8 @@ if __name__ == "__main__":
     )
     parser.add_argument("en",  type=Path, help="English monolingual file (one sentence/line)")
     parser.add_argument("hil", type=Path, help="Hiligaynon monolingual file (one sentence/line)")
-    parser.add_argument("--out",      type=Path, default=Path("corpus_out"),
-                        help="Output directory (default: corpus_out/)")
+    parser.add_argument("--out", type=Path, default=Path("data/processed/pretraining"),
+                        help="Output directory (default: data/processed/pretraining/)")
     parser.add_argument("--strategy", choices=["downsample_en", "upsample_hil", "balanced"],
                         default="downsample_en",
                         help="Balancing strategy (default: downsample_en)")

@@ -1,180 +1,106 @@
-# Getting started
-
-### TSV Editor (web UI)
-A browser-based editor for viewing and fixing spelling/grammar in parallel TSV datasets.
-
-**Start the server:**
-```bash
-python tsv_editor.py
-```
-Then open **http://localhost:5000** in your browser.
-
-**What you can do:**
-- Select any `.tsv` file in the project from the dropdown (auto-discovered, grouped by folder)
-- Click any cell to edit it — changes save to disk immediately on blur
-- Press `Enter` to commit an edit, `Escape` to cancel
-- Search across all columns with the search box
-- Navigate large files with pagination (50 / 100 / 200 / 500 rows per page)
-- Add a blank row with **+ Row**
-- Delete a row with the **✕** button (asks for confirmation)
-- Edited rows are highlighted with a purple left border so you can track what changed
-
-**Install dependency** (Flask, usually already present):
-```bash
-pip install flask
-```
-
+---
+language:
+  - hil
+  - en
+task_categories:
+  - translation
+  - text-generation
+pretty_name: Hiligaynon-English Dataset Collection
+tags:
+  - hiligaynon
+  - parallel-corpus
 ---
 
-### Convert your csv to tsv
-```
-CSV to TSV Converter CLI
+# Hiligaynon-English Dataset Collection
 
-Usage: python csv_to_tsv.py <input.csv> [output.tsv]
+A working collection of Hiligaynon and English parallel, monolingual, and
+instruction-tuning data for machine-translation research.
 
-Examples:
-    python csv_to_tsv.py data.csv           # Creates data.tsv
-    python csv_to_tsv.py data.csv out.tsv   # Creates out.tsv
-```
-This will convert any valid `.csv` file into equivalent `.tsv`
+## Repository layout
 
-### Validating the quality of a dataset
-```
-  python parallel_analyzer.py tagalog-filipino-english-translation/train_data.csv
-
-  # monolingual
-  python parallel_analyzer.py --src hil_raw.txt
-
-  # parallel txt pair
-  python parallel_analyzer.py --src corpus_en.txt --tgt corpus_tl.txt
-
-  # parallel csv/tsv
-  python parallel_analyzer.py data.tsv
-  python parallel_analyzer.py data.tsv --src-col en --tgt-col tl
-```
-Should specify the valid `.tsv` as the target file
-
-### Scraping dataset
-Install this deps
-```
-pip install requests beautifulsoup4 langdetect tqdm lxml
+```text
+.
+├── data/
+│   ├── external/    # third-party datasets, unchanged
+│   ├── raw/         # source captures, dictionaries, and phrase sheets
+│   ├── interim/     # pipeline intermediates
+│   ├── processed/   # model-ready and derived files
+│   └── releases/    # packaged dataset snapshots
+├── docs/references/ # linguistic references and source documents
+├── mideval/         # protected evaluation datasets
+├── notebooks/       # exploratory notebooks
+├── scripts/         # scraping, conversion, validation, and sampling CLIs
+├── tests/           # standard-library unit tests
+└── tsv-editor/      # browser-based corpus editor (nested repository)
 ```
 
-Running the scraper
-```
-# Start fresh, all categories
-python scrape_bombo.py
+See [data/README.md](data/README.md) for the stage definitions.
 
-# Just the most Hiligaynon-dense categories
-python scrape_bombo.py --categories top-stories balita-espesyal
+## Main datasets
 
-# If you start getting 429s, raise the delay and resume
-python scrape_bombo.py --delay 3.0 --resume
-```
+| Path | Content |
+| --- | --- |
+| `data/processed/parallel-149k/` | `source,target` training and validation CSV files |
+| `data/processed/en-hil/` | Hiligaynon-English TSV and JSONL exports |
+| `data/raw/bible/` | Verse-aligned Hiligaynon-English corpus and scraper cache |
+| `data/external/tagalog-filipino-english/` | External Tagalog-English train/test data |
+| `data/processed/pretraining/` | Cleaned, balanced, and shuffled pretraining corpora |
+| `data/processed/instruction/` | Hiligaynon instruction-tuning data |
+| `mideval/` | Evaluation-only data; intentionally kept separate |
 
-### Converting opus datasets
-OPUS corpora come in a few formats — let me make it handle all the common ones.Three input modes depending on what OPUS gave you:
+Schemas are not yet normalized across sources. Inspect each file's header before
+combining datasets.
+
+## Common commands
+
+Run commands from the repository root.
 
 ```bash
-# Most common — paired plain text files
-python opus_to_tsv.py --paired en.txt hil.txt -o test.tsv
+# Sample exactly 1,000 data rows while preserving the TSV header
+just sample INPUT.tsv 1000 -o sample.tsv --seed 42
 
-# TMX translation memory
-python opus_to_tsv.py --tmx corpus.tmx --src-lang en --tgt-lang hil -o test.tsv
+# Analyze a parallel dataset
+python scripts/parallel_analyzer.py data/processed/en-hil/en_hil.tsv
 
-# Moses-style XML (the .xml files from OPUS downloads)
-python opus_to_tsv.py --xml en.xml hil.xml -o test.tsv
+# Convert formats
+python scripts/csv_to_tsv.py INPUT.csv OUTPUT.tsv
+python scripts/jsonl_to_tsv.py INPUT.jsonl -o OUTPUT.tsv
+python scripts/converter.py INPUT.parquet OUTPUT.tsv
+
+# Build a balanced pretraining corpus
+python scripts/corpus_prep.py EN.txt HIL.txt
+
+# Run tests (or: python -m unittest discover -s tests -v)
+just test
 ```
 
-Sampling flags for building a proper test split:
+### Scrapers
+
 ```bash
-# Grab 1000 random pairs as your test set
-python opus_to_tsv.py --paired en.txt hil.txt -o test.tsv --shuffle --max 1000
+python scripts/scrape_bombo.py --resume
+python scripts/scrapescript.py --resume
 ```
 
-Output is a two-column TSV with a `src`/`tgt` header by default — pass `--src-col` / `--tgt-col` to rename them. `--skip-empty` drops any pairs where either side is blank, which is worth doing before evaluation.
+Scraper outputs default to `data/raw/bombo/` and `data/raw/bible/`.
 
-### JSONL to TSV
+### TSV editor
+
 ```bash
-# Output defaults to same name as input with .tsv extension
-python jsonl_to_tsv.py corpus.jsonl
-
-# Explicit output path
-python jsonl_to_tsv.py corpus.jsonl -o data/test.tsv
+python -m pip install -r tsv-editor/requirements.txt
+python tsv-editor/app.py
 ```
 
-Your sample data would produce:
-```
-src	tgt
-Hiligaynon	Hiligaynon
-I	Ako
-```
+The editor scans this repository by default. Set `TSV_DATA_DIR` to limit it to
+another directory.
 
-One note on `trgs` — it's a list, so by default only the first translation is taken. If you want every target as its own row (useful if entries have multiple valid translations), pass `--all-trgs`.
+## Data provenance and licensing
 
-### .parquet to tsv
-```
-# Auto-names output (data.parquet → data.tsv)
-python converter.py data.parquet
+This repository aggregates files from several sources, including web scrapes,
+reference documents, spreadsheets, and external corpora. A single repository
+license is not currently documented. Verify the provenance, terms, and
+redistribution rights of each source before publishing or using it beyond
+research.
 
-# Specify output path
-python converter.py data.parquet output.tsv
-```
-
-### pre ppping corpus for base training
-Here's a complete Python implementation of the pipeline:
-**Basic usage:**
-```bash
-python corpus_prep.py en.txt hil.txt
-```
-
-**With all options:**
-```bash
-python corpus_prep.py en.txt hil.txt \
-  --out ./corpus_out \
-  --strategy downsample_en \   # or upsample_hil / balanced
-  --tokenize \                 # trains + encodes with SentencePiece
-  --vocab 8000 \
-  --seed 42
-```
-
-**Install optional dependency** (only needed for `--tokenize`):
-```bash
-pip install sentencepiece
-```
-
-**What the script produces in `corpus_out/`:**
-
-| File                    | Description                           |
-| ----------------------- | ------------------------------------- |
-| `en_clean.txt`          | Whitespace-normalized English         |
-| `hil_clean.txt`         | Whitespace-normalized Hiligaynon      |
-| `en_balanced.txt`       | English after balancing strategy      |
-| `hil_balanced.txt`      | Hiligaynon after balancing strategy   |
-| `mixed.txt`             | Concatenated (ordered)                |
-| `mixed_shuffled.txt`    | **Your pretraining corpus**           |
-| `sp_model.model`        | SentencePiece model (if `--tokenize`) |
-| `mixed_shuffled.sp.txt` | Encoded corpus (if `--tokenize`)      |
-
-**Three balancing strategies:**
-
-- `downsample_en` — randomly samples English down to match Hiligaynon size (recommended when EN is much larger)
-- `upsample_hil` — repeats Hiligaynon lines to match English size (more data, but repetition risk)
-- `balanced` — downsamples *both* to the smaller corpus (strictest, least data)
-
-### Synthetic converter
-```sh
-python translate_corpus.py english.txt hiligaynon.txt
-
-# GPU, larger batches, greedy for speed:
-python translate_corpus.py english.txt hiligaynon.txt --device cuda --batch-size 64 --num-beams 1
-
-# Crashed halfway? Resume:
-python translate_corpus.py english.txt hiligaynon.txt --resume
-
-# EN → HIL (default)
-python translate_corpus.py english.txt hiligaynon.txt
-
-# HIL → EN
-python translate_corpus.py hiligaynon.txt english.txt --direction hil2en
-```
+The data may contain scraping errors, synthetic translations, duplicates,
+inconsistent schemas, and culturally or linguistically inaccurate text.
+Evaluation data in `mideval/` should not be mixed into training data.
